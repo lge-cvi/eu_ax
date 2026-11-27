@@ -1,0 +1,2009 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>숲지기의 아침 — The Warden Wakes</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center;font-family:"Hiragino Mincho ProN","Noto Serif KR","Nanum Myeongjo",Georgia,serif;color:#efe6d2}
+  #wrap{position:relative;width:min(100vw,calc(100vh*1.85));aspect-ratio:1.85/1}
+  canvas{width:100%;height:100%;display:block;background:#000}
+  #ui{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;transition:opacity .8s;background:radial-gradient(ellipse at center,rgba(0,0,0,.15),rgba(0,0,0,.55))}
+  #ui.hide{opacity:0;pointer-events:none}
+  #ui h1{margin:0;font-weight:400;letter-spacing:.35em;font-size:clamp(20px,3.2vw,46px);text-shadow:0 2px 18px rgba(0,0,0,.6)}
+  #ui h2{margin:-10px 0 0;font-weight:400;letter-spacing:.5em;font-size:clamp(10px,1vw,14px);opacity:.75}
+  #play{font:inherit;font-size:clamp(13px,1.2vw,18px);letter-spacing:.2em;color:#2a2026;background:#f1e3c2;border:0;border-radius:2px;padding:12px 30px;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+  #play:disabled{opacity:.5;cursor:wait}
+  #play:hover:not(:disabled){background:#fff3d6}
+  #msg{font-size:12px;letter-spacing:.2em;opacity:.7;min-height:1em}
+  #prog{width:200px;height:2px;background:rgba(255,255,255,.15);transition:opacity .6s}
+  #bar{height:100%;width:0;background:#f1e3c2}
+  #keys{position:absolute;bottom:14px;font-size:11px;letter-spacing:.15em;opacity:.5}
+  #ui.end h2,#ui.end #keys{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="film"></canvas>
+  <div id="ui">
+    <h1>숲지기의 아침</h1>
+    <h2>THE WARDEN WAKES</h2>
+    <button id="play" disabled>배경을 그리는 중…</button>
+    <div id="prog"><div id="bar"></div></div>
+    <div id="msg"></div>
+    <div id="keys">SPACE 일시정지 · R 처음부터 · M 음소거 · F 전체화면</div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ============================================================
+   CORE — math, noise, colour, splines, hand-inked strokes
+   ============================================================ */
+const W = 1920, H = 1038, FPS = 24, TAU = Math.PI * 2;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const lin = (a, b, x) => clamp((x - a) / (b - a), 0, 1);
+const EZ = {
+  inOut: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  out: t => 1 - Math.pow(1 - t, 3), in: t => t * t * t,
+  out2: t => 1 - (1 - t) * (1 - t), in2: t => t * t,
+  sine: t => .5 - .5 * Math.cos(Math.PI * t)
+};
+function RNG(seed) {
+  let s = (seed >>> 0) || 1;
+  return () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function hsh(i, j = 0, k = 0) {
+  let h = Math.imul(i | 0, 374761393) ^ Math.imul(j | 0, 668265263) ^ Math.imul(k | 0, 1274126177);
+  h = Math.imul(h ^ h >>> 13, 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
+}
+function n1(x, s = 0) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return lerp(hsh(i, s, 7), hsh(i + 1, s, 7), u) * 2 - 1; }
+function n2(x, y, s = 0) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return lerp(lerp(hsh(xi, yi, s), hsh(xi + 1, yi, s), u), lerp(hsh(xi, yi + 1, s), hsh(xi + 1, yi + 1, s), u), v) * 2 - 1;
+}
+function fbm(x, y, s = 0, o = 4) { let v = 0, a = .5, f = 1; for (let i = 0; i < o; i++) { v += a * n2(x * f, y * f, s + i * 17); f *= 2.03; a *= .5; } return v; }
+
+/* ---------- colour ---------- */
+const _cc = new Map();
+function rgbOf(h) {
+  if (typeof h !== 'string') return h;
+  let r = _cc.get(h);
+  if (!r) { const s = h.slice(1); r = [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)]; _cc.set(h, r); }
+  return r;
+}
+function css(c, a = 1) { const r = rgbOf(c); return `rgba(${r[0] | 0},${r[1] | 0},${r[2] | 0},${a})`; }
+function mix(a, b, t) { const A = rgbOf(a), B = rgbOf(b); return [lerp(A[0], B[0], t), lerp(A[1], B[1], t), lerp(A[2], B[2], t)]; }
+function vary(c, rng, amt = 12, a = 1) {
+  const r = rgbOf(c), d = (rng() - .5) * amt;
+  return `rgba(${clamp(r[0] + d + (rng() - .5) * amt * .5, 0, 255) | 0},${clamp(r[1] + d + (rng() - .5) * amt * .5, 0, 255) | 0},${clamp(r[2] + d + (rng() - .5) * amt * .5, 0, 255) | 0},${a})`;
+}
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; }
+
+/* ---------- affine ---------- */
+class Mx {
+  constructor(a = 1, b = 0, c = 0, d = 1, e = 0, f = 0) { this.a = a; this.b = b; this.c = c; this.d = d; this.e = e; this.f = f; }
+  mul(m) { return new Mx(this.a * m.a + this.c * m.b, this.b * m.a + this.d * m.b, this.a * m.c + this.c * m.d, this.b * m.c + this.d * m.d, this.a * m.e + this.c * m.f + this.e, this.b * m.e + this.d * m.f + this.f); }
+  t(x, y) { return this.mul(new Mx(1, 0, 0, 1, x, y)); }
+  r(a) { const c = Math.cos(a), s = Math.sin(a); return this.mul(new Mx(c, s, -s, c, 0, 0)); }
+  s(x, y = x) { return this.mul(new Mx(x, 0, 0, y, 0, 0)); }
+  k(sx, sy) { return this.mul(new Mx(1, sy, sx, 1, 0, 0)); }
+  p(x, y) { return [this.a * x + this.c * y + this.e, this.b * x + this.d * y + this.f]; }
+  get sc() { return Math.sqrt(Math.abs(this.a * this.d - this.b * this.c)); }
+}
+
+/* ---------- splines ---------- */
+// pts: [[x,y,(sharp)]...]  -> dense array
+function crSpline(pts, closed, step = 4) {
+  // expand sharp points by duplication
+  const P = [];
+  for (const p of pts) { P.push(p); if (p[2] === 1) P.push(p); }
+  const n = P.length, out = [];
+  if (n < 2) return P.map(p => [p[0], p[1]]);
+  const get = i => closed ? P[(i + n) % n] : P[clamp(i, 0, n - 1)];
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = get(i - 1), p1 = get(i), p2 = get(i + 1), p3 = get(i + 2);
+    const len = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    if (len < 0.01) continue;
+    const m = Math.max(1, Math.ceil(len / step));
+    for (let k = 0; k < m; k++) {
+      const t = k / m, t2 = t * t, t3 = t2 * t;
+      out.push([
+        .5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+        .5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+      ]);
+    }
+  }
+  if (!closed) out.push([P[n - 1][0], P[n - 1][1]]);
+  return out;
+}
+function arcLen(d) { const s = [0]; for (let i = 1; i < d.length; i++) s.push(s[i - 1] + Math.hypot(d[i][0] - d[i - 1][0], d[i][1] - d[i - 1][1])); return s; }
+function signedArea(d) { let a = 0; for (let i = 0, n = d.length; i < n; i++) { const p = d[i], q = d[(i + 1) % n]; a += p[0] * q[1] - q[0] * p[1]; } return a / 2; }
+
+// map + spline + hand jitter (screen space). seed changes per drawing => "boil" only when moving
+function prep(m, pts, closed, seed, jit = 1, step = 3) {
+  const mp = pts.map(p => { const q = m.p(p[0], p[1]); if (p[2] === 1) q.push(1); return q; });
+  const d = crSpline(mp, closed, step);
+  if (jit > 0 && d.length > 2) {
+    const s = arcLen(d), n = d.length;
+    const o = d.map((p, i) => {
+      const a = d[(i - 1 + n) % n], b = d[(i + 1) % n];
+      let tx = b[0] - a[0], ty = b[1] - a[1]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+      const off = jit * (n1(s[i] / 55 + seed * 3.17, seed) * .8 + n1(s[i] / 13 + seed, seed + 3) * .25);
+      return [p[0] - ty * off, p[1] + tx * off];
+    });
+    return o;
+  }
+  return d;
+}
+function pathOf(d, closed = true) {
+  const p = new Path2D(); if (!d.length) return p;
+  p.moveTo(d[0][0], d[0][1]); for (let i = 1; i < d.length; i++) p.lineTo(d[i][0], d[i][1]);
+  if (closed) p.closePath(); return p;
+}
+
+/* ---------- ink ---------- */
+// variable width brush/pen line. o: {w, col, seed, closed, taper, light:[lx,ly], sw (shadow weight), var, vf}
+function ink(ctx, d, o) {
+  const n = d.length; if (n < 2) return;
+  const closed = !!o.closed, s = arcLen(d), L = s[n - 1];
+  if (L < 0.5) return;
+  const orient = closed ? (signedArea(d) > 0 ? 1 : -1) : 1;
+  const left = [], right = [];
+  const seed = o.seed || 0, vr = o.var ?? .35, vf = o.vf || 46, tl = o.taper ?? Math.min(L * .4, 30);
+  const lx = o.light ? o.light[0] : 0, ly = o.light ? o.light[1] : 0, sw = o.sw ?? .6;
+  for (let i = 0; i < n; i++) {
+    const a = closed ? d[(i - 1 + n) % n] : d[Math.max(0, i - 1)], b = closed ? d[(i + 1) % n] : d[Math.min(n - 1, i + 1)];
+    let tx = b[0] - a[0], ty = b[1] - a[1]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+    const nx = -ty, ny = tx; // left normal
+    let w = o.w;
+    if (!closed && tl > 0) { const e = Math.min(s[i] / tl, (L - s[i]) / tl, 1); w *= .12 + .88 * Math.pow(Math.max(e, 0), .65); }
+    w *= 1 + vr * n1(s[i] / vf + seed * 5.3, seed + 11);
+    if (o.light) {
+      // outward normal for closed: orientation dependent
+      const onx = closed ? -nx * orient : nx, ony = closed ? -ny * orient : ny;
+      const dt = onx * lx + ony * ly;
+      w *= 1 + sw * clamp(-dt, 0, 1) - .62 * clamp(dt - .15, 0, 1);
+    }
+    w = Math.max(w, .25) * .5;
+    left.push([d[i][0] + nx * w, d[i][1] + ny * w]); right.push([d[i][0] - nx * w, d[i][1] - ny * w]);
+  }
+  ctx.beginPath();
+  if (closed) {
+    ctx.moveTo(left[0][0], left[0][1]); for (let i = 1; i < n; i++) ctx.lineTo(left[i][0], left[i][1]); ctx.closePath();
+    ctx.moveTo(right[n - 1][0], right[n - 1][1]); for (let i = n - 2; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]); ctx.closePath();
+  } else {
+    ctx.moveTo(left[0][0], left[0][1]); for (let i = 1; i < n; i++) ctx.lineTo(left[i][0], left[i][1]);
+    for (let i = n - 1; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]); ctx.closePath();
+  }
+  ctx.fillStyle = o.col; ctx.fill('nonzero');
+}
+// shifted copy of a path (for cel shadow / rim crescents)
+function shifted(path, dx, dy) { const p = new Path2D(); p.addPath(path, new DOMMatrix([1, 0, 0, 1, dx, dy])); return p; }
+/* ============================================================
+   PAINT — gouache brush primitives for background art
+   ============================================================ */
+function blobPath(ctx, x, y, r, rng, o = {}) {
+  const n = o.n || clamp(((r / 3) | 0) + 6, 6, 20), ex = o.ex || 1, ang = o.ang || 0, rough = o.rough ?? .35;
+  const ca = Math.cos(ang), sa = Math.sin(ang), pts = [];
+  const ph = rng() * TAU;
+  for (let k = 0; k < n; k++) {
+    const a = ph + k / n * TAU, rr = r * (1 - rough / 2 + rough * rng());
+    const px = Math.cos(a) * rr * ex, py = Math.sin(a) * rr;
+    pts.push([x + px * ca - py * sa, y + px * sa + py * ca]);
+  }
+  ctx.beginPath();
+  const m0 = [(pts[n - 1][0] + pts[0][0]) / 2, (pts[n - 1][1] + pts[0][1]) / 2];
+  ctx.moveTo(m0[0], m0[1]);
+  for (let k = 0; k < n; k++) { const p = pts[k], q = pts[(k + 1) % n]; ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2); }
+  ctx.closePath();
+}
+function dab(ctx, x, y, r, col, rng, o) { blobPath(ctx, x, y, r, rng, o); ctx.fillStyle = col; ctx.fill(); }
+
+// tapered brush stroke with ragged sides
+function bstroke(ctx, x1, y1, x2, y2, w, col, rng, o = {}) {
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1, nx = -dy / L, ny = dx / L;
+  const bend = (o.bend ?? (rng() - .5) * .25) * L, segs = o.segs || 7, tp = o.taper ?? 1;
+  const Lf = [], Rt = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, bx = x1 + dx * t + nx * bend * Math.sin(Math.PI * t), by = y1 + dy * t + ny * bend * Math.sin(Math.PI * t);
+    let ww = w * (tp ? Math.pow(Math.sin(Math.PI * (.06 + .88 * t)), .5 * tp) : 1) * (.8 + .4 * rng()) * .5;
+    if (o.headHeavy) ww *= 1.3 - .8 * t;
+    Lf.push([bx + nx * ww, by + ny * ww]); Rt.push([bx - nx * ww * (.7 + .5 * rng()), by - ny * ww * (.7 + .5 * rng())]);
+  }
+  ctx.beginPath(); ctx.moveTo(Lf[0][0], Lf[0][1]);
+  for (const p of Lf) ctx.lineTo(p[0], p[1]);
+  for (let i = Rt.length - 1; i >= 0; i--) ctx.lineTo(Rt[i][0], Rt[i][1]);
+  ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+}
+// dry-brush streaks (visible bristle texture)
+function dry(ctx, x, y, len, w, ang, col, rng, k = 5) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  for (let i = 0; i < k; i++) {
+    const o = (rng() - .5) * w, l0 = rng() * len * .2, l1 = len * (.6 + .4 * rng());
+    bstroke(ctx, x - s * o + c * l0, y + c * o + s * l0, x - s * o + c * l1, y + c * o + s * l1, .8 + rng() * w * .12, col, rng, { segs: 4 });
+  }
+}
+function softDot(ctx, x, y, r, col, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, css(col, a)); g.addColorStop(.55, css(col, a * .55)); g.addColorStop(1, css(col, 0));
+  ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+}
+
+/* foliage clump — dark mass → lit plane → light plane → sparkle, leafy edges */
+function leafyBlob(ctx, x, y, r, col, rng, leaf, vamt, arc) {
+  dab(ctx, x, y, r, vary(col, rng, vamt), rng, { rough: .22, ex: 1.12 });
+  const ne = Math.max(6, (r / 3.2 * leaf) | 0);
+  for (let j = 0; j < ne; j++) {
+    const a = arc ? arc[0] + (rng() - .5) * arc[1] : rng() * TAU, rr = r * (.9 + .12 * rng());
+    dab(ctx, x + Math.cos(a) * rr * 1.1, y + Math.sin(a) * rr, r * (.09 + .1 * rng()) * Math.min(leaf, 1.4), vary(col, rng, vamt), rng, { ex: 1.8, ang: a, rough: .5, n: 6 });
+  }
+}
+function clump(ctx, cx, cy, R, pal, rng, o = {}) {
+  const lx = o.lx ?? .62, ly = o.ly ?? -.78, sq = o.sq ?? .82, leaf = o.leaf ?? 1, vamt = o.vary ?? 12;
+  const la = Math.atan2(ly, lx);
+  // silhouette mass
+  leafyBlob(ctx, cx, cy, R * .86, pal[0], rng, leaf, vamt);
+  if (R < 10) { dab(ctx, cx + lx * R * .3, cy + ly * R * .3, R * .5, vary(pal[1], rng, vamt), rng, { n: 7 }); return; }
+  const N = clamp(Math.round(Math.pow(R / 10, 2) * .8 * (o.dens ?? 1)), 5, 90);
+  const T = [];
+  for (let i = 0; i < N; i++) {
+    const a = rng() * TAU, d = Math.sqrt(rng()) * .82;
+    const x = Math.cos(a) * d, y = Math.sin(a) * d;
+    T.push({ x: cx + x * R, y: cy + y * R * sq, f: (x * lx + y * ly) + (rng() - .5) * .55, r: R * (.17 + .13 * rng()) });
+  }
+  T.sort((a, b) => a.y - b.y);
+  for (const t of T) {
+    const tone = t.f > .42 ? 2 : t.f > -.15 ? 1 : 0;
+    const body = pal[tone], cap = tone === 2 ? (pal[3] ? mix(pal[2], pal[3], .3) : pal[2]) : pal[tone + 1];
+    leafyBlob(ctx, t.x, t.y, t.r, body, rng, leaf * .7, vamt);
+    if (tone > 0 || rng() < .5) {
+      const cr = t.r * (tone === 2 ? .55 : .62);
+      const cc = tone === 0 ? pal[1] : cap;
+      dab(ctx, t.x + lx * t.r * .38, t.y + ly * t.r * .38, cr, vary(cc, rng, vamt), rng, { ex: 1.25, rough: .45, n: 8, ang: rng() });
+      for (let j = 0; j < 3; j++) { const a = la + (rng() - .5) * 2.2, d = t.r * (.55 + .3 * rng()); dab(ctx, t.x + lx * t.r * .3 + Math.cos(a) * d, t.y + ly * t.r * .3 + Math.sin(a) * d, t.r * (.12 + .08 * rng()), vary(cc, rng, vamt), rng, { ex: 1.8, ang: a, n: 6, rough: .5 }); }
+    }
+    if (tone === 2 && pal[3] && rng() < (o.hi ?? .3)) { const a = la + (rng() - .5) * 1.2; dab(ctx, t.x + Math.cos(a) * t.r * .65, t.y + Math.sin(a) * t.r * .6, t.r * (.1 + .08 * rng()), vary(pal[3], rng, 8), rng, { ex: 1.8, ang: a + 1.4, n: 6 }); }
+  }
+}
+
+function trunkShape(ctx, x, yb, yt, wb, wt, pal, rng, o = {}) {
+  const lean = o.lean || 0, segs = 14, L = [], R = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, y = lerp(yb, yt, t), w = lerp(wb, wt, Math.pow(t, .8)) * (1 + .08 * n1(t * 5, o.seed || 3));
+    const cx = x + lean * t * t * (yb - yt) + n1(t * 3, (o.seed || 3) + 5) * wb * .25;
+    L.push([cx - w / 2, y]); R.push([cx + w / 2, y]);
+  }
+  // root flare
+  L[0][0] -= wb * .35; R[0][0] += wb * .35;
+  ctx.beginPath(); ctx.moveTo(L[0][0], L[0][1]); for (const p of L) ctx.lineTo(p[0], p[1]);
+  for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]); ctx.closePath();
+  ctx.fillStyle = vary(pal[0], rng, 6); ctx.fill();
+  ctx.save(); ctx.clip();
+  // lit side strip
+  const side = o.side ?? 1;
+  for (let i = 0; i < segs; i++) {
+    const a = side > 0 ? R[i] : L[i], b = side > 0 ? R[i + 1] : L[i + 1], w = (R[i][0] - L[i][0]);
+    bstroke(ctx, a[0] - side * w * .18, a[1], b[0] - side * w * .18, b[1], w * .35, vary(pal[1], rng, 10), rng, { taper: 0, segs: 3 });
+    if (pal[2] && rng() < .7) bstroke(ctx, a[0] - side * w * .06, a[1], b[0] - side * w * .06, b[1], w * .12, vary(pal[2], rng, 10), rng, { taper: .5, segs: 3 });
+  }
+  // bark streaks
+  const nb = ((yb - yt) / 6) | 0;
+  for (let i = 0; i < nb; i++) {
+    const t = rng(), y = lerp(yb, yt, t), j = (t * segs) | 0, xl = L[j][0], xr = R[j][0];
+    const xx = lerp(xl, xr, rng());
+    bstroke(ctx, xx, y, xx + (rng() - .5) * 3, y - 6 - rng() * 22, 1 + rng() * 2.2, vary(rng() < .5 ? pal[0] : (pal[3] || pal[0]), rng, 14, .8), rng, { segs: 3 });
+  }
+  // moss patches
+  if (o.moss) for (let i = 0; i < nb / 3; i++) {
+    const t = rng() * .6, y = lerp(yb, yt, t), j = (t * segs) | 0, xx = lerp(L[j][0], R[j][0], side > 0 ? .55 + .4 * rng() : .05 + .4 * rng());
+    dab(ctx, xx, y, 2 + rng() * 5, vary(o.moss, rng, 16, .85), rng, { ex: .6 + rng() });
+  }
+  ctx.restore();
+  return { L, R };
+}
+
+function fern(ctx, x, y, len, ang, cols, rng, o = {}) {
+  const curl = o.curl ?? .5, n = o.n || 13, lw = o.lw || len * .2;
+  let px = x, py = y, a = ang;
+  const st = len / n, pts = [];
+  for (let i = 0; i <= n; i++) { pts.push([px, py, a]); a += curl * .09 * (1 + i / n); px += Math.cos(a) * st; py += Math.sin(a) * st; }
+  for (let i = 1; i < pts.length; i++) {
+    const [qx, qy, qa] = pts[i], f = 1 - i / pts.length, l = lw * (.3 + .9 * Math.sin(Math.PI * Math.min(1, (1 - f) * 1.3 + .1)));
+    for (const sd of [-1, 1]) {
+      const la = qa + sd * (1.15 - .25 * (1 - f)), ex = qx + Math.cos(la) * l, ey = qy + Math.sin(la) * l;
+      const c = cols[(rng() * cols.length) | 0];
+      bstroke(ctx, qx, qy, ex, ey, Math.max(1.5, l * .38), vary(c, rng, 14), rng, { segs: 4, bend: sd * .15 });
+    }
+  }
+  ctx.lineWidth = Math.max(1, len * .012); ctx.strokeStyle = css(cols[0], .8);
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (const p of pts) ctx.lineTo(p[0], p[1]); ctx.stroke();
+}
+function grassTuft(ctx, x, y, h, n, cols, rng, o = {}) {
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (rng() - .5) * (o.spread ?? 1.1), l = h * (.45 + .6 * rng());
+    const bx = x + (rng() - .5) * h * .4;
+    bstroke(ctx, bx, y, bx + Math.cos(a) * l, y + Math.sin(a) * l, Math.max(1.2, h * .05) * (.7 + .6 * rng()), vary(cols[(rng() * cols.length) | 0], rng, 16), rng, { segs: 5, bend: (rng() - .5) * .35, headHeavy: true });
+  }
+}
+function flowersDots(ctx, x, y, r, n, col, rng, ctr) {
+  for (let i = 0; i < n; i++) {
+    const px = x + (rng() - .5) * r * 2, py = y + (rng() - .5) * r * .8, s = 1 + rng() * 2.4;
+    dab(ctx, px, py, s, vary(col, rng, 14), rng, { n: 5, rough: .5 });
+    if (ctr && s > 2) dab(ctx, px + .3, py + .3, s * .35, ctr, rng, { n: 5 });
+  }
+}
+// cumulus / stratus cloud: lobes rendered back→front, each with crescent light bands
+function cloud(ctx, x, y, w, h, pal, rng, o = {}) {
+  const lx = o.lx ?? .6, ly = o.ly ?? .7, nl = o.lobes || Math.max(2, Math.min(7, (w / (h * 1.6)) | 0));
+  const lobes = [];
+  for (let i = 0; i < nl; i++) { const t = nl === 1 ? .5 : i / (nl - 1), prof = Math.sin(Math.PI * (.12 + .76 * t)); lobes.push({ x: x + (t - .5) * w * .85 + (rng() - .5) * w * .1, y: y - h * .25 * prof * (o.puffy ?? 1) + (rng() - .5) * h * .25, w: w / nl * (1.3 + .6 * rng()), h: h * (.45 + .55 * prof) }); }
+  lobes.sort((a, b) => a.y - b.y);
+  for (const L of lobes) {
+    const pad = 20, cw = L.w * (o.ex || 1.5) + L.h * 2 + pad * 2, ch = L.h * 2.4 + pad * 2;
+    const m = mk(cw, ch), mx = m.getContext('2d'); mx.fillStyle = '#fff';
+    const nb = 5 + (rng() * 5 | 0);
+    for (let j = 0; j < nb; j++) { const t = rng(), bx = cw / 2 + (t - .5) * L.w * (o.ex || 1.5) * .7, pr = Math.sin(Math.PI * clamp(t, .05, .95)), r = L.h * (.25 + .55 * pr) * (.6 + .5 * rng()); blobPath(mx, bx, ch * .62 - r * .35 * (o.puffy ?? 1) - rng() * L.h * .3 * pr * (o.puffy ?? 1), r, rng, { ex: (o.ex || 1.5) * (.8 + .4 * rng()), rough: .22 }); mx.fill(); }
+    const out = mk(cw, ch), oc = out.getContext('2d');
+    oc.drawImage(m, 0, 0); oc.globalCompositeOperation = 'source-in'; oc.fillStyle = vary(pal[0], rng, 6); oc.fillRect(0, 0, cw, ch); oc.globalCompositeOperation = 'source-over';
+    const bands = [[pal[1], .62, 16], [pal[2], .28, 7], [pal[3], .07, 1.5]];
+    oc.globalCompositeOperation = 'source-atop';
+    for (const [col, k, bl] of bands) {
+      if (!col) continue;
+      const t = mk(cw, ch), tc = t.getContext('2d');
+      tc.drawImage(m, 0, 0); tc.globalCompositeOperation = 'destination-out'; tc.drawImage(m, -lx * k * L.h, -ly * k * L.h);
+      tc.globalCompositeOperation = 'source-in'; tc.fillStyle = vary(col, rng, 6); tc.fillRect(0, 0, cw, ch);
+      oc.filter = bl ? `blur(${bl}px)` : 'none'; oc.drawImage(t, 0, 0); oc.filter = 'none';
+    }
+    oc.globalCompositeOperation = 'source-over';
+    oc.globalCompositeOperation = 'source-atop';
+    for (let j = 0; j < 14; j++) { const px = rng() * cw, py = rng() * ch; bstroke(oc, px, py, px + 30 + rng() * 60, py + (rng() - .5) * 6, 3 + rng() * 6, vary(rng() < .5 ? pal[1] : pal[0], rng, 10, .25), rng); }
+    ctx.save(); ctx.globalAlpha = o.a ?? 1; ctx.drawImage(out, L.x - cw / 2, L.y - ch * .62); ctx.restore();
+  }
+}
+// paint vertical gradient with brush strokes (sky)
+function paintSky(ctx, w, h, stops, rng, o = {}) {
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  for (const [p, c] of stops) g.addColorStop(p, css(c));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  const sample = y => { const t = clamp(y / h, 0, 1); for (let i = 1; i < stops.length; i++) if (t <= stops[i][0]) { const a = stops[i - 1], b = stops[i]; return mix(a[1], b[1], (t - a[0]) / (b[0] - a[0] || 1)); } return rgbOf(stops[stops.length - 1][1]); };
+  const n = o.n || 900;
+  for (let i = 0; i < n; i++) {
+    const y = rng() * h, x = rng() * w, l = 60 + rng() * 260, c = sample(y + (rng() - .5) * 40);
+    bstroke(ctx, x, y, x + l, y + (rng() - .5) * 8, 3 + rng() * 10, vary(c, rng, 10, .35 + rng() * .35), rng, { segs: 6, bend: (rng() - .5) * .05 });
+  }
+  return sample;
+}
+// paper / gouache surface texture over a finished painting
+function paperTex(ctx, w, h, rng, amt = .05) {
+  const n = (w * h / 900) | 0;
+  for (let i = 0; i < n; i++) {
+    const x = rng() * w, y = rng() * h, l = 4 + rng() * 14, a = (rng() - .5) * .6 + (rng() < .5 ? 0 : Math.PI / 2) * 0;
+    ctx.fillStyle = rng() < .5 ? `rgba(255,248,230,${amt * rng()})` : `rgba(20,20,40,${amt * rng()})`;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.fillRect(0, 0, l, 1 + rng() * 2); ctx.restore();
+  }
+}
+// soft mist band sprite
+function mistBand(w, h, col, rng, o = {}) {
+  const c = mk(w, h), x = c.getContext('2d');
+  const n = o.n || ((w / 40) | 0);
+  for (let i = 0; i < n; i++) {
+    const px = rng() * w, py = h * (.35 + .45 * rng()), r = h * (.25 + .45 * rng());
+    x.save(); x.translate(px, py); x.scale(2.6 + rng() * 2, 1); softDot(x, 0, 0, r / 1.5, col, (o.a ?? .22) * (.5 + rng())); x.restore();
+  }
+  // fade edges horizontally for tiling
+  x.globalCompositeOperation = 'destination-in';
+  const g = x.createLinearGradient(0, 0, w, 0);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(.12, 'rgba(0,0,0,1)'); g.addColorStop(.88, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+  return c;
+}
+/* ============================================================
+   ROBOT — "the Old Warden": hand-inked cel mech, front model sheet
+   all shapes in model units; frames via affine Mx
+   ============================================================ */
+function ell(cx, cy, rx, ry, n = 18, ph = 0) { const o = []; for (let i = 0; i < n; i++) { const a = ph + i / n * TAU; o.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); } return o; }
+const MUL_SHADE = '#8890b6';   // cel shadow tint (multiplied)
+const MUL_SHADE2 = '#9aa0c0';
+const RPAL = {
+  arm: '#92a597', armDk: '#76887f', terra: '#c27857', cream: '#e4d3a2', metal: '#6c7078', gap: '#262934',
+  rust: '#94553a', rustL: '#c98a55', chipEdge: '#d9d2b4', moss: '#7f9845', mossL: '#b6c35e', mossH: '#e6dc86', mossS: '#56703f',
+  glass: '#1d2c34', leaf: '#6c9a48', leafL: '#a8c45c', bark: '#5e4b40', ink: '#2a2026', mossInk: '#2e3b25',
+  flower: '#f4efe0', flowerY: '#f0cf55', flowerV: '#b8a6d8', glow: '#9ff5df', glowCore: '#f2fffb', glowDeep: '#3fbfa6'
+};
+function robotPalette(warm, cool = '#4e5878') {
+  const p = {}, k = (1 - warm) * .42;
+  for (const key in RPAL) p[key] = (key === 'glow' || key === 'glowCore' || key === 'glowDeep' || key === 'ink' || key === 'mossInk') ? RPAL[key] : css(mix(RPAL[key], cool, k));
+  p.inkC = css(mix(RPAL.ink, '#1c2030', 1 - warm));
+  p.rimC = warm > 0 ? css(mix('#3a2810', '#a8743a', warm)) : null;
+  return p;
+}
+
+/* ---------- static model data (model units) ---------- */
+const MD = {
+  chest: [[-70, -492], [-150, -478], [-215, -440], [-245, -370], [-240, -280], [-212, -185], [-160, -105], [-105, -52], [0, -38], [105, -52], [160, -105], [212, -185], [240, -280], [245, -370], [215, -440], [150, -478], [70, -492], [0, -497]],
+  abdomen: [[-122, -80], [122, -80], [116, 0], [90, 36], [-90, 36], [-116, 0]],
+  pelvis: [[-150, -10], [150, -10], [162, 50], [112, 96], [-112, 96], [-162, 50]],
+  collar: [[-98, -488], [-60, -507], [0, -513], [60, -507], [98, -488], [60, -470], [0, -466], [-60, -470]],
+  engine: x0 => [[x0 - 38, -430], [x0 - 41, -520], [x0 - 35, -568, 1], [x0 + 35, -568, 1], [x0 + 41, -520], [x0 + 38, -430]],
+  pauldron: [[-100, 22], [-113, -30], [-96, -86], [-52, -120], [8, -128], [66, -110], [106, -70], [122, -12], [117, 44], [90, 82], [30, 94], [-40, 82], [-86, 58]],
+  pauldronMoss: [[-104, -60], [-96, -92], [-60, -126], [0, -146], [62, -128], [106, -86], [116, -50], [100, -58], [86, -40], [66, -60], [46, -44], [22, -66], [-4, -52], [-30, -70], [-56, -56], [-78, -72], [-94, -50]],
+  upper: [[-46, -14], [44, -14], [50, 60], [48, 172], [-44, 174], [-50, 60]],
+  forearm: [[-62, 214], [60, 212], [74, 262], [78, 380], [66, 422], [-60, 424], [-72, 382], [-70, 262]],
+  hand: [[-58, 418], [60, 418], [76, 452], [80, 500], [64, 548], [30, 566], [-14, 568], [-54, 552], [-74, 506], [-72, 456]],
+  thumb: [[-58, 436], [-90, 466], [-96, 508], [-78, 522], [-62, 494]],
+  headShell: [[-82, -150], [-40, -168], [40, -168], [82, -150], [102, -112], [110, -62], [104, -22], [82, 2], [-82, 2], [-104, -22], [-110, -62], [-102, -112]],
+  headMoss: [[-86, -146], [-66, -166], [-30, -180], [10, -184], [50, -174], [84, -150], [90, -134], [74, -140], [58, -128], [40, -140], [18, -130], [-2, -142], [-24, -132], [-46, -142], [-66, -134], [-90, -128]],
+  brim: [[-126, -122], [-62, -136], [0, -139], [62, -136], [126, -122], [122, -98], [62, -108], [0, -111], [-62, -108], [-122, -98]],
+  muzzle: [[-60, -46], [60, -46], [68, -26], [57, -4], [-57, -4], [-68, -26]],
+  antenna: [[-72, -158], [-56, -158], [-57, -198, 1], [-61, -190], [-65, -206, 1], [-72, -194, 1]],
+  kneelThighL: [[-166, 30], [-38, 30], [-52, 170], [-70, 236], [-168, 236], [-186, 150]],
+  kneelShinR: [[58, 112], [178, 112], [172, 238], [68, 238]],
+  kneelFootR: [[42, 226], [192, 226], [210, 262, 1], [28, 262, 1]],
+};
+// decorations are generated once (on-model across every drawing)
+const DECO = (() => {
+  const r = RNG(9137), D = {};
+  const chips = (bx0, by0, bx1, by1, n) => { const o = []; for (let i = 0; i < n; i++) { const cx = lerp(bx0, bx1, r()), cy = lerp(by0, by1, r()), s = 3 + Math.pow(r(), 2) * 13, k = 5 + (r() * 3 | 0), pts = []; for (let j = 0; j < k; j++) { const a = j / k * TAU + r() * .5, rr = s * (.5 + .7 * r()); pts.push([cx + Math.cos(a) * rr * (1.3), cy + Math.sin(a) * rr * .8]); } o.push(pts); } return o; };
+  const streaks = (bx0, by0, bx1, by1, n, Lm) => { const o = []; for (let i = 0; i < n; i++) o.push([lerp(bx0, bx1, r()), lerp(by0, by1, r()), Lm * (.3 + .7 * r()), 2 + r() * 5, r() * 1000]); return o; };
+  D.chestChips = chips(-240, -480, 240, -60, 30);
+  D.chestRust = streaks(-220, -420, 220, -200, 22, 150);
+  D.headChips = chips(-110, -168, 110, 0, 18); D.headRust = streaks(-100, -110, 100, -60, 9, 55);
+  D.pChips = chips(-115, -120, 120, 90, 20); D.pRust = streaks(-100, 30, 100, 60, 8, 50);
+  D.aChips = chips(-75, -10, 80, 560, 26); D.aRust = streaks(-60, 20, 60, 260, 9, 120);
+  D.eChips = chips(-40, -560, 40, -430, 8);
+  D.legChips = chips(-180, 0, 200, 260, 16);
+  D.cracks = []; for (let i = 0; i < 5; i++) { let x = 14, y = -18, a = r() * TAU; const pts = [[x, y]]; for (let j = 0; j < 5; j++) { a += (r() - .5) * .9; const l = 6 + r() * 12; x += Math.cos(a) * l; y += Math.sin(a) * l; pts.push([x, y]); } D.cracks.push(pts); }
+  const flw = (pts, n, cols) => { const o = []; for (let i = 0; i < n; i++) { const p = pts[(r() * pts.length) | 0]; o.push([p[0] + (r() - .5) * 26, p[1] + r() * 10, 4 + r() * 5, cols[(r() * cols.length) | 0], r() * TAU]); } return o; };
+  D.pFlowersR = flw(MD.pauldronMoss.slice(1, 6), 9, ['flower', 'flower', 'flowerY', 'flowerV']);
+  D.pFlowersL = flw(MD.pauldronMoss.slice(1, 6), 6, ['flower', 'flowerY']);
+  D.hFlowers = flw(MD.headMoss.slice(1, 6), 6, ['flower', 'flowerY', 'flower']);
+  D.grassP = []; for (let i = 0; i < 14; i++) { const t = r(); D.grassP.push([lerp(-90, 100, t), -100 - 40 * Math.sin(Math.PI * t) + r() * 8, 14 + r() * 22, (r() - .5) * .8]); }
+  D.grassH = []; for (let i = 0; i < 9; i++) { const t = r(); D.grassH.push([lerp(-70, 70, t), -150 - 26 * Math.sin(Math.PI * t), 10 + r() * 16, (r() - .5) * .8]); }
+  D.mossLumps = []; for (let i = 0; i < 40; i++) D.mossLumps.push([r(), r(), r(), r()]);
+  return D;
+})();
+
+/* ---------- render context helpers ---------- */
+function RCtx(ctx, V, pal) {
+  const sc = V.m.sc, lw = V.lw, light = V.light, jit = .45 + lw * .22;
+  let pi = 0;
+  const S = {
+    ctx, sc, lw, light, pal, jit,
+    part(m, pts, o = {}) {
+      const seed = V.seed * 31 + (pi++) * 7;
+      const d = prep(m, pts, o.closed !== false, seed, o.jit ?? jit, o.step || 3);
+      const path = pathOf(d);
+      ctx.fillStyle = o.fill; ctx.fill(path);
+      ctx.save(); ctx.clip(path);
+      if (o.under) o.under(m);
+      if (o.sh !== 0) {
+        const s = (o.sh ?? 60) * sc * (m.sc / sc);
+        ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = o.shadeC || MUL_SHADE;
+        const p2 = new Path2D(); p2.addPath(path); p2.addPath(shifted(path, light[0] * s, light[1] * s)); ctx.fill(p2, 'evenodd');
+        if (o.casts) for (const c of o.casts) ctx.fill(shifted(c.path, -light[0] * c.k * sc, -light[1] * c.k * sc));
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      if (pal.rimC && o.rim !== 0 && V.sun > 0) {
+        const s = (o.rim ?? 6) * sc * (m.sc / sc) * V.sun;
+        ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = pal.rimC;
+        const p3 = new Path2D(); p3.addPath(path); p3.addPath(shifted(path, -light[0] * s, -light[1] * s)); ctx.fill(p3, 'evenodd');
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      if (o.over) o.over(m);
+      ctx.restore();
+      if (!o.noInk) ink(ctx, d, { closed: o.closed !== false, w: (o.lw ?? 1) * lw, col: o.inkC || pal.inkC, seed, light, sw: .7 });
+      return { d, path };
+    },
+    line(m, pts, w = .55, col, o = {}) {
+      const seed = V.seed * 31 + (pi++) * 7;
+      const d = prep(m, pts, false, seed, o.jit ?? jit * .8, 3);
+      ink(ctx, d, { w: w * lw, col: col || pal.inkC, seed, taper: o.taper ?? Math.min(18, lw * 6), var: .4 });
+    },
+    chips(m, list, amt = 1) {
+      if (sc < .22 || V.detail === 0) return;
+      const n = Math.ceil(list.length * amt);
+      for (let i = 0; i < n; i++) {
+        const pts = list[i].map(p => m.p(p[0], p[1]));
+        const o = Math.max(.8, sc * 1.6);
+        ctx.beginPath(); pts.forEach((p, j) => j ? ctx.lineTo(p[0] + o, p[1] + o) : ctx.moveTo(p[0] + o, p[1] + o)); ctx.closePath();
+        ctx.fillStyle = pal.chipEdge; ctx.globalAlpha = .55; ctx.fill(); ctx.globalAlpha = 1;
+        ctx.beginPath(); pts.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+        ctx.fillStyle = i % 3 === 0 ? pal.rust : pal.gap; ctx.globalAlpha = i % 3 === 0 ? .8 : .55; ctx.fill(); ctx.globalAlpha = 1;
+      }
+    },
+    rust(m, list, a = .5) {
+      if (sc < .2) return;
+      for (const [x, y, L, w, s] of list) {
+        const pts = []; const k = 6;
+        for (let j = 0; j <= k; j++) { const t = j / k; pts.push(m.p(x + n1(t * 3 + s, 3) * 3 - w * (1 - t) * .9, y + L * t)); }
+        for (let j = k; j >= 0; j--) { const t = j / k; pts.push(m.p(x + n1(t * 3 + s, 3) * 3 + w * (1 - t) * .9, y + L * t)); }
+        ctx.beginPath(); pts.forEach((p, j) => j ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+        ctx.fillStyle = css('#7a4630', a * .75 * (.5 + .5 * hsh(s | 0))); ctx.fill();
+      }
+    },
+    rivets(m, list, r = 5) {
+      if (sc < .3) return;
+      for (const [x, y] of list) {
+        const p = m.p(x, y), rr = r * sc;
+        ctx.beginPath(); ctx.arc(p[0], p[1], rr, 0, TAU); ctx.fillStyle = pal.gap; ctx.globalAlpha = .75; ctx.fill(); ctx.globalAlpha = 1;
+        if (rr > 2) { ctx.beginPath(); ctx.arc(p[0] + rr * .3, p[1] - rr * .3, rr * .4, 0, TAU); ctx.fillStyle = pal.chipEdge; ctx.globalAlpha = .7; ctx.fill(); ctx.globalAlpha = 1; }
+      }
+    },
+    flower(p, size, col, rot) {
+      const s = size * sc;
+      if (s < 2.2) { ctx.fillStyle = col; ctx.fillRect(p[0] - 1, p[1] - 1, 2.2, 2.2); return; }
+      ctx.save(); ctx.translate(p[0], p[1]); ctx.rotate(rot);
+      for (let i = 0; i < 5; i++) { const a = i / 5 * TAU; ctx.beginPath(); ctx.ellipse(Math.cos(a) * s * .55, Math.sin(a) * s * .55, s * .5, s * .32, a, 0, TAU); ctx.fillStyle = col; ctx.fill(); if (s > 5) { ctx.lineWidth = Math.max(.6, lw * .3); ctx.strokeStyle = pal.inkC; ctx.globalAlpha = .7; ctx.stroke(); ctx.globalAlpha = 1; } }
+      ctx.beginPath(); ctx.arc(0, 0, s * .28, 0, TAU); ctx.fillStyle = pal.flowerY === col ? '#c98a2a' : pal.flowerY; ctx.fill();
+      ctx.restore();
+    }
+  };
+  return S;
+}
+
+/* moss cap with lumps, flowers, grass */
+function mossCap(S, m, pts, seed, flowers, grass) {
+  const { ctx, pal, sc } = S;
+  const res = S.part(m, pts, {
+    fill: pal.moss, sh: 26, rim: 7, lw: .8, inkC: RPAL.mossInk,
+    over: mm => {
+      if (sc < .15) return;
+      const rr = RNG(seed);
+      let bx0 = 1e9, bx1 = -1e9, by0 = 1e9, by1 = -1e9; for (const p of pts) { bx0 = Math.min(bx0, p[0]); bx1 = Math.max(bx1, p[0]); by0 = Math.min(by0, p[1]); by1 = Math.max(by1, p[1]); }
+      for (let i = 0; i < 26; i++) {
+        const x = lerp(bx0, bx1, rr()), y = lerp(by0, by1, rr() * .55), q = m.p(x, y), r = (5 + rr() * 9) * sc;
+        ctx.fillStyle = rr() < .7 ? pal.mossL : pal.mossH; blobPath(ctx, q[0], q[1], r, rr, { ex: 1.6, rough: .5, n: 7 }); ctx.fill();
+      }
+      for (let i = 0; i < 14; i++) {
+        const x = lerp(bx0, bx1, rr()), y = lerp(by0, by1, .55 + rr() * .45), q = m.p(x, y), r = (4 + rr() * 7) * sc;
+        ctx.fillStyle = pal.mossS; blobPath(ctx, q[0], q[1], r, rr, { ex: 1.5, rough: .5, n: 7 }); ctx.fill();
+      }
+    }
+  });
+  if (grass) for (const [x, y, l, a] of grass) {
+    const p0 = [x, y + 6], p1 = [x + Math.sin(a) * l * .5, y - l * .5], p2 = [x + Math.sin(a) * l * 1.1, y - l];
+    S.line(m, [p0, p1, p2], .7, RPAL.mossInk, { taper: 4 });
+  }
+  if (flowers) for (const [x, y, s, c, rot] of flowers) S.flower(m.p(x, y), s, pal[c], rot);
+  return res;
+}
+
+/* leafy cel clump (character-layer foliage) */
+function celClump(S, m, cx, cy, R, seed) {
+  const r = RNG(seed), pts = [], n = 11;
+  for (let i = 0; i < n; i++) { const a = i / n * TAU; const rr = R * (.82 + .3 * r()); pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr * .82]); const a2 = (i + .5) / n * TAU; pts.push([cx + Math.cos(a2) * R * .78, cy + Math.sin(a2) * R * .66]); }
+  S.part(m, pts, {
+    fill: S.pal.leaf, sh: R * .55, rim: R * .12, lw: .75, inkC: '#24301f', step: 2.5,
+    over: () => { const q = m.p(cx + R * .25, cy - R * .3); S.ctx.fillStyle = S.pal.leafL; blobPath(S.ctx, q[0], q[1], R * .32 * S.sc, r, { ex: 1.3, n: 8, rough: .45 }); S.ctx.fill(); }
+  });
+}
+
+/* ---------- vines (verlet, simulated in root/model space) ---------- */
+function makeVines(defs) {
+  return defs.map(v => ({ ...v, pts: null, old: null, cut: false }));
+}
+function vineAnchor(F, v) { return F[v.f].p(v.p[0], v.p[1]); }
+function stepVines(vines, F, dt, wind = 0, t = 0) {
+  for (const v of vines) {
+    const a = vineAnchor(F, v);
+    if (!v.pts) { v.pts = []; v.old = []; for (let i = 0; i <= v.n; i++) { v.pts.push([a[0] + i * .5, a[1] + i * v.seg]); v.old.push([a[0] + i * .5, a[1] + i * v.seg]); } }
+    if (v.cutAt != null && t >= v.cutAt) v.cut = true;
+    for (let i = 0; i <= v.n; i++) {
+      const p = v.pts[i], o = v.old[i];
+      const vx = (p[0] - o[0]) * .965, vy = (p[1] - o[1]) * .965;
+      o[0] = p[0]; o[1] = p[1];
+      p[0] += vx + wind * dt * dt * (1 + i * .1) * Math.sin(t * 2 + i * .5 + v.n);
+      p[1] += vy + 1400 * dt * dt;
+    }
+    for (let it = 0; it < 5; it++) {
+      if (!v.cut) { v.pts[0][0] = a[0]; v.pts[0][1] = a[1]; }
+      for (let i = 0; i < v.n; i++) {
+        const p = v.pts[i], q = v.pts[i + 1], dx = q[0] - p[0], dy = q[1] - p[1], d = Math.hypot(dx, dy) || 1, df = (d - v.seg) / d * .5;
+        if (i === 0 && !v.cut) { q[0] -= dx * df * 2; q[1] -= dy * df * 2; }
+        else { p[0] += dx * df; p[1] += dy * df; q[0] -= dx * df; q[1] -= dy * df; }
+      }
+    }
+  }
+}
+function drawVines(S, root, vines, filter) {
+  const { ctx, pal, sc, lw } = S;
+  for (const v of vines) {
+    if (!v.pts || (filter && !filter(v))) continue;
+    const pts = v.pts.map(p => root.p(p[0], p[1]));
+    const seed = (v.id || 1) * 13;
+    const d = crSpline(pts, false, 3);
+    ink(ctx, d, { w: lw * 1.7 * (v.w || 1), col: '#2c3a26', seed, taper: 10, var: .3 });
+    if (sc < .12) continue;
+    for (let i = 1; i <= v.n; i++) {
+      if ((i + (v.id | 0)) % 2) continue;
+      const p = pts[i], q = pts[i - 1], ang = Math.atan2(p[1] - q[1], p[0] - q[0]) + ((i >> 1) % 2 ? 1.1 : -1.1);
+      const L = (v.leaf || 20) * sc * (.7 + .5 * hsh(i, v.id | 0));
+      const tip = [p[0] + Math.cos(ang) * L, p[1] + Math.sin(ang) * L], nx = -Math.sin(ang) * L * .32, ny = Math.cos(ang) * L * .32;
+      const mid = [(p[0] + tip[0]) / 2, (p[1] + tip[1]) / 2];
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.quadraticCurveTo(mid[0] + nx, mid[1] + ny, tip[0], tip[1]); ctx.quadraticCurveTo(mid[0] - nx, mid[1] - ny, p[0], p[1]);
+      ctx.fillStyle = pal.leaf; ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.quadraticCurveTo(mid[0] - nx, mid[1] - ny, tip[0], tip[1]); ctx.lineTo(p[0], p[1]); ctx.fillStyle = 'rgba(40,60,70,.35)'; ctx.fill();
+      if (L > 6) { ctx.lineWidth = Math.max(.6, lw * .35); ctx.strokeStyle = '#24301f'; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.quadraticCurveTo(mid[0] + nx, mid[1] + ny, tip[0], tip[1]); ctx.quadraticCurveTo(mid[0] - nx, mid[1] - ny, p[0], p[1]); ctx.stroke(); }
+    }
+  }
+}
+
+/* ---------- pose → frames (model space; root = ground point) ---------- */
+function robotFrames(P) {
+  const I = new Mx();
+  const pel = I.t(P.x || 0, -P.pel);
+  const T = pel.r(P.tilt || 0).s(1 + (P.sq || 0), 1 - (P.sq || 0));
+  const hu = P.hu || 0;
+  const Hd = T.t(P.hx || 0, -476 + (P.hdy || 0) - hu * 6).r(P.hrot || 0);
+  const SR = T.t(252, -404 + (P.shR || 0)), SL = T.t(-252, -404 + (P.shL || 0)).s(-1, 1);
+  const AR = T.t(234, -376 + (P.aRdy || 0)).r(-(P.aR ?? .05));
+  const AL = T.t(-234, -376 + (P.aLdy || 0)).s(-1, 1).r(-(P.aL ?? .05));
+  return { I, pel, T, Hd, SR, SL, AR, AL };
+}
+
+/* ---------- main draw ---------- */
+// P pose, V view {m, lw, light, warm, sun, seed, detail, eyes, core, look:[x,y], vines, legs}
+function drawRobot(ctx, P, V) {
+  const pal = robotPalette(V.warm ?? 1, V.cool);
+  const F = robotFrames(P), R = V.m, S = RCtx(ctx, V, pal);
+  const G = k => R.mul(F[k]);
+  const T = G('T'), Hd = G('Hd'), SR = G('SR'), SL = G('SL'), AR = G('AR'), AL = G('AL'), PL = G('pel');
+  const out = {};
+  const det = S.sc > .28;
+
+  /* engines (behind) */
+  for (const sx of [-1, 1]) {
+    const x0 = sx * 128;
+    S.part(T, MD.engine(x0), {
+      fill: pal.metal, sh: 30, rim: 8,
+      over: m => { S.rust(m, [[x0 - 20, -540, 90, 6, 3], [x0 + 12, -530, 70, 4, 9]], .6); S.chips(m, DECO.eChips.map(c => c.map(p => [p[0] + x0, p[1]])), .7); }
+    });
+    if (det) { S.line(T, [[x0 - 40, -526], [x0, -522], [x0 + 40, -526]], .5); S.line(T, [[x0 - 40, -494], [x0, -490], [x0 + 40, -494]], .5); }
+    S.part(T, ell(x0, -568, 33, 10, 14), { fill: pal.gap, sh: 0, rim: 0, lw: .7 });
+    if (V.engine) out['eng' + sx] = T.p(x0, -568);
+    if (det && sx < 0) S.line(T, [[x0 - 10, -568], [x0 - 14, -592], [x0 - 20, -604]], .6, RPAL.mossInk), S.line(T, [[x0 + 4, -568], [x0 + 8, -596]], .6, RPAL.mossInk);
+  }
+
+  /* legs */
+  const legs = V.legs || 'kneel';
+  if (legs === 'kneel') {
+    S.part(PL, MD.pelvis, { fill: pal.metal, sh: 40 });
+    S.part(PL, MD.kneelThighL, { fill: pal.arm, sh: 50, over: m => S.chips(m, DECO.legChips, .6) });
+    S.part(PL, ell(-118, 222, 64, 56, 16), { fill: pal.arm, sh: 34, over: m => S.chips(m, DECO.legChips.slice(0, 5)) });
+    S.part(PL, MD.kneelShinR, { fill: pal.arm, sh: 40, over: m => S.rust(m, [[100, 130, 90, 6, 4]]) });
+    S.part(PL, MD.kneelFootR, { fill: pal.metal, sh: 18 });
+    S.part(PL, ell(116, 104, 70, 62, 16), { fill: pal.arm, sh: 36, over: m => { S.chips(m, DECO.legChips.slice(5, 11)); } });
+    mossCap(S, PL, [[60, 70], [90, 48], [130, 44], [170, 66], [176, 82], [150, 76], [126, 84], [96, 76], [70, 86]], 77, null, null);
+  } else {
+    const fly = legs === 'fly';
+    S.part(PL, MD.pelvis, { fill: pal.metal, sh: 40 });
+    for (const sx of [-1, 1]) {
+      const L = PL.t(sx * 95, 30).r(fly ? sx * -.06 : 0).s(sx, 1);
+      S.part(L, [[-70, -10], [70, -10], [64, 270], [-60, 270]], { fill: pal.arm, sh: 50, over: m => S.chips(m, DECO.legChips, .4) });
+      const K = L.t(0, 292).r(fly ? .25 : 0);
+      S.part(K, [[-66, 20], [70, 20], [80, 200], [70, 250], [-64, 250], [-74, 200]], { fill: pal.arm, sh: 50, over: m => S.rust(m, [[0, 40, 120, 6, sx * 7]]) });
+      S.part(K, ell(0, 4, 60, 52, 16), { fill: pal.arm, sh: 30 });
+      S.part(K, [[-92, 236], [96, 236], [118, fly ? 300 : 286, 1], [-112, fly ? 300 : 286, 1]], { fill: pal.metal, sh: 20 });
+      out['foot' + sx] = K.p(0, 290);
+    }
+  }
+
+  /* torso */
+  S.part(T, MD.abdomen, { fill: pal.metal, sh: 50, over: m => { if (det) { S.line(m, [[-118, -42], [0, -36], [118, -42]], .5); S.line(m, [[-112, -6], [0, 0], [112, -6]], .5); } } });
+  const pauldronCasterR = { path: pathOf(prep(SR, MD.pauldron, true, 1, 0, 6)), k: 40 };
+  const pauldronCasterL = { path: pathOf(prep(SL, MD.pauldron, true, 1, 0, 6)), k: 40 };
+  const headCaster = { path: pathOf(prep(Hd, MD.headShell, true, 1, 0, 6)), k: 26 };
+  S.part(T, MD.chest, {
+    fill: pal.arm, sh: 120, rim: 12, casts: [pauldronCasterR, pauldronCasterL, headCaster],
+    under: m => {
+      // terracotta stripe + faded emblem
+      const st = prep(m, [[-236, -380], [-196, -398], [-146, -150], [-182, -138]], true, 5, S.jit, 4);
+      ctx.fillStyle = pal.terra; ctx.fill(pathOf(st));
+      if (det) {
+        const em = m.p(168, -236); ctx.lineWidth = 7 * S.sc; ctx.strokeStyle = pal.cream; ctx.globalAlpha = .75;
+        ctx.beginPath(); ctx.arc(em[0], em[1], 26 * S.sc, -.4, TAU - 1.2); ctx.stroke();
+        const b0 = m.p(150, -236), b1 = m.p(186, -236); ctx.beginPath(); ctx.moveTo(b0[0], b0[1]); ctx.lineTo(b1[0], b1[1]); ctx.stroke(); ctx.globalAlpha = 1;
+      }
+      S.chips(m, DECO.chestChips); S.rust(m, DECO.chestRust, .45);
+    },
+    over: m => {
+      if (!det) return;
+      S.line(m, [[-238, -396], [-120, -414], [0, -419], [120, -414], [238, -396]], .55);
+      S.line(m, [[-118, -414], [-128, -300], [-150, -170], [-178, -118]], .5);
+      S.line(m, [[118, -414], [128, -300], [150, -170], [178, -118]], .5);
+      S.line(m, [[-150, -100], [0, -84], [150, -100]], .5);
+      for (let i = 0; i < 3; i++) S.part(m, [[176, -338 + i * 16], [214, -342 + i * 16], [214, -334 + i * 16], [176, -330 + i * 16]], { fill: pal.gap, sh: 0, rim: 0, lw: .35 });
+      S.rivets(m, [[-200, -400], [-160, -408], [-80, -416], [-40, -418], [40, -418], [80, -416], [160, -408], [200, -400], [-140, -250], [140, -250]], 5);
+    }
+  });
+  // chest core
+  const core = V.core || 0;
+  S.part(T, ell(0, -300, 66, 66, 22), { fill: pal.metal, sh: 30, rim: 6, over: m => S.rivets(m, Array.from({ length: 8 }, (_, i) => [Math.cos(i / 8 * TAU + .2) * 56, -300 + Math.sin(i / 8 * TAU + .2) * 56]), 5) });
+  const gl = S.part(T, ell(0, -300, 45, 45, 20), {
+    fill: core > 0 ? css(mix(RPAL.glass, RPAL.glowDeep, Math.min(1, core * 1.3))) : pal.glass, sh: core > .2 ? 0 : 30, rim: 0, lw: .8,
+    over: m => {
+      if (core > 0) {
+        const c = m.p(0, -300);
+        ctx.fillStyle = css(RPAL.glow, Math.min(1, core * 1.1)); ctx.beginPath(); blobPath(ctx, c[0], c[1], 30 * S.sc, RNG(V.seed + 3), { rough: .18, n: 12 }); ctx.fill();
+        ctx.fillStyle = css(RPAL.glowCore, Math.min(1, core)); ctx.beginPath(); blobPath(ctx, c[0] - 2 * S.sc, c[1] + 2 * S.sc, 14 * S.sc, RNG(V.seed + 4), { rough: .2, n: 10 }); ctx.fill();
+      }
+      // cracks
+      if (det) for (const cr of DECO.cracks) S.line(m, cr.map(p => [p[0], p[1] - 300]), .4, core > .3 ? 'rgba(255,255,255,.8)' : 'rgba(150,180,190,.6)', { taper: 4 });
+      const h = m.p(16, -318); ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.beginPath(); ctx.ellipse(h[0], h[1], 10 * S.sc, 5 * S.sc, -.7, 0, TAU); ctx.fill();
+    }
+  });
+  out.core = T.p(0, -300);
+
+  /* chest moss + flowers (upper left) */
+  mossCap(S, T, [[-210, -446], [-150, -480], [-90, -494], [-60, -488], [-70, -470], [-100, -462], [-120, -440], [-150, -446], [-170, -424], [-196, -430], [-222, -410]], 41, DECO.hFlowers.slice(0, 3).map(f => [f[0] - 150, f[1] - 300, f[2], f[3], f[4]]), null);
+
+  /* arms */
+  for (const side of ['L', 'R']) {
+    const A = side === 'R' ? AR : AL;
+    S.part(A, MD.upper, { fill: pal.arm, sh: 46, rim: 8, over: m => { S.chips(m, DECO.aChips.slice(0, 8)); if (det) { S.line(m, [[-48, 40], [0, 46], [48, 40]], .5); S.line(m, [[-48, 130], [0, 136], [48, 130]], .5); } } });
+    S.part(A, ell(0, 196, 50, 30, 16), { fill: pal.metal, sh: 22 });
+    S.part(A, MD.forearm, {
+      fill: pal.arm, sh: 60, rim: 10,
+      under: m => { const b = prep(m, [[-74, 210], [76, 208], [80, 254], [-76, 258]], true, 9, S.jit, 4); ctx.fillStyle = pal.terra; ctx.fill(pathOf(b)); S.chips(m, DECO.aChips.slice(8)); S.rust(m, DECO.aRust, .5); },
+      over: m => { if (det) { S.line(m, [[-72, 256], [0, 262], [76, 254]], .55); S.line(m, [[30, 270], [40, 340], [36, 410]], .45); S.rivets(m, [[-50, 236], [-10, 238], [30, 236]], 4); } }
+    });
+    S.part(A, MD.thumb, { fill: pal.armDk, sh: 20 });
+    S.part(A, MD.hand, { fill: pal.armDk, sh: 40, over: m => { if (det) { S.line(m, [[-24, 486], [-22, 530], [-18, 566]], .5); S.line(m, [[16, 486], [18, 530], [22, 562]], .5); S.line(m, [[-60, 470], [0, 478], [70, 468]], .5); } } });
+    mossCap(S, A, [[-66, 236], [-40, 222], [0, 218], [40, 222], [72, 240], [76, 262], [56, 254], [30, 266], [4, 258], [-22, 268], [-48, 256], [-70, 262]], side === 'R' ? 51 : 52, null, null);
+  }
+
+  /* collar + head */
+  S.part(T, MD.collar, { fill: pal.gap, sh: 0, rim: 0, lw: .8 });
+  const hu = P.hu || 0, fdy = -hu * 20;
+  if (hu > .05) S.part(Hd, [[-80, -6], [80, -6], [70, 10 + hu * 16], [-70, 10 + hu * 16]], { fill: pal.metal, sh: 0, rim: 0 });
+  const shell = hu < -.05 ? MD.headShell.map(p => p[1] < -100 ? [p[0], p[1] + hu * 14] : p) : MD.headShell;
+  const brimM = Hd.t(0, fdy - (V.brim || 0) * 6).r((V.brimTilt || 0) * .06);
+  const brimCaster = { path: pathOf(prep(brimM, MD.brim, true, 1, 0, 6)), k: 34 };
+  S.part(Hd, shell, {
+    fill: pal.arm, sh: 70, rim: 10, casts: [brimCaster],
+    under: m => { S.chips(m, DECO.headChips); S.rust(m, DECO.headRust, .5); },
+    over: m => {
+      if (det) { S.line(m, [[-98, -96], [-100, -56], [-90, -18]], .5); S.line(m, [[98, -96], [100, -56], [90, -18]], .5); }
+    }
+  });
+  // ear discs
+  for (const sx of [-1, 1]) S.part(Hd, ell(sx * 108, -66 + fdy * .3, 12, 24, 12), { fill: pal.metal, sh: 10 });
+  // eye sockets + lenses
+  const eyes = V.eyes || [0, 0], look = V.look || [0, 0];
+  const eyeDef = [[-48, -72, 32, 29, 22], [46, -70, 26, 24, 17]];
+  eyeDef.forEach(([ex, ey, rx, ry, lr], i) => {
+    const e = eyes[i];
+    S.part(Hd, ell(ex, ey + fdy, rx, ry, 18), { fill: pal.gap, sh: 0, rim: 0, lw: .9 });
+    S.part(Hd, ell(ex, ey + fdy + 2, lr, lr, 18), {
+      fill: css(mix(RPAL.glass, RPAL.glowDeep, Math.min(.75, e * .9))), sh: e > .3 ? 0 : 12, rim: 0, lw: .6,
+      over: m => {
+        const c = m.p(ex + look[0] * lr * .3, ey + fdy + 2 + look[1] * lr * .3);
+        if (e > 0) {
+          ctx.fillStyle = css(RPAL.glow, Math.min(1, e * 1.2)); ctx.beginPath(); ctx.arc(c[0], c[1], lr * (.3 + .26 * Math.min(1, e)) * S.sc, 0, TAU); ctx.fill();
+          ctx.fillStyle = css(RPAL.glowCore, Math.min(1, e)); ctx.beginPath(); ctx.arc(c[0], c[1], lr * (.12 + .14 * Math.min(1, e)) * S.sc, 0, TAU); ctx.fill();
+        }
+        // iris ring
+        const ring = m.p(ex, ey + fdy + 2); ctx.lineWidth = Math.max(.6, S.lw * .35); ctx.strokeStyle = e > .3 ? 'rgba(220,255,245,.6)' : 'rgba(140,170,180,.5)';
+        ctx.beginPath(); ctx.arc(ring[0], ring[1], lr * .8 * S.sc, (V.iris || 0) + .3, (V.iris || 0) + TAU - .6); ctx.stroke();
+        const h = m.p(ex + lr * .38, ey + fdy + 2 - lr * .42); ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.beginPath(); ctx.ellipse(h[0], h[1], lr * .22 * S.sc, lr * .13 * S.sc, -.6, 0, TAU); ctx.fill();
+      }
+    });
+    out['eye' + i] = Hd.p(ex + look[0] * lr * .3, ey + fdy + 2);
+  });
+  // muzzle grille
+  S.part(Hd.t(0, fdy * .8), MD.muzzle, {
+    fill: pal.metal, sh: 22, rim: 6,
+    over: m => { if (S.sc > .2) for (let x = -40; x <= 40; x += 20) S.line(m, [[x, -40], [x, -10]], .55, pal.gap, { taper: 2 }); }
+  });
+  // brim (the "brow")
+  S.part(brimM, MD.brim, { fill: pal.terra, sh: 14, rim: 5, under: m => { S.chips(m, DECO.headChips.slice(0, 8), 1); S.rust(m, [[-80, -112, 30, 4, 2], [40, -114, 26, 3, 5]], .6); } });
+  S.part(Hd, MD.antenna, { fill: pal.metal, sh: 6, rim: 0, lw: .8 });
+  mossCap(S, Hd.t(0, hu < 0 ? hu * 14 : 0), MD.headMoss, 31, DECO.hFlowers, DECO.grassH);
+  out.head = Hd.p(0, -80);
+
+  /* pauldrons */
+  for (const side of ['L', 'R']) {
+    const Sm = side === 'R' ? SR : SL;
+    S.part(Sm, MD.pauldron, {
+      fill: pal.arm, sh: 70, rim: 12,
+      under: m => {
+        const st = prep(m, [[-30, -150], [16, -150], [74, 110], [28, 110]], true, side === 'R' ? 3 : 4, S.jit, 4); ctx.fillStyle = pal.terra; ctx.fill(pathOf(st));
+        S.chips(m, DECO.pChips); S.rust(m, DECO.pRust, .55);
+      },
+      over: m => { if (det) { S.line(m, [[-96, 40], [-40, 64], [30, 74], [100, 50]], .55); S.rivets(m, [[-70, 54], [-30, 66], [10, 72], [50, 68], [86, 56]], 5); } }
+    });
+    mossCap(S, Sm, MD.pauldronMoss, side === 'R' ? 61 : 62, side === 'R' ? DECO.pFlowersR : DECO.pFlowersL, DECO.grassP);
+  }
+  out.perch = SR.p(14, -142);
+  out.shoulderR = SR.p(0, -60);
+
+  /* sapling on left pauldron (bends with sway) */
+  {
+    const sway = P.sap || 0, base = F.SL.p(30, -136);
+    const bm = R.t(...base).r(-.18 + sway * .5);
+    const trunkPts = [[0, 0], [4 + sway * 10, -80], [-6 + sway * 30, -170], [-18 + sway * 60, -250]];
+    const tp = bm;
+    S.part(tp, [[-12, 4], [12, 4], [8, -90], [-2 + sway * 30, -170], [-14 + sway * 60, -255], [-20 + sway * 60, -250], [-12 + sway * 30, -170], [-6, -90]], { fill: pal.bark, sh: 8, rim: 3, lw: .8 });
+    S.line(tp, [[0, -120], [30 + sway * 30, -170], [52 + sway * 40, -196]], 1.0, pal.inkC, { taper: 8 });
+    S.line(tp, [[-4, -170 + 0], [-46 + sway * 40, -210], [-70 + sway * 50, -214]], .9, pal.inkC, { taper: 8 });
+    celClump(S, tp, 50 + sway * 46, -206, 46, 701);
+    celClump(S, tp, -70 + sway * 56, -226, 42, 702);
+    celClump(S, tp, -20 + sway * 64, -276, 56, 703);
+    celClump(S, tp, 20 + sway * 60, -248, 40, 704);
+    out.sapTop = tp.p(-20 + sway * 64, -300);
+  }
+
+  /* vines */
+  if (V.vines) drawVines(S, R, V.vines);
+
+  /* core spill light on armor */
+  if (core > .05) {
+    const c = out.core, rr = 190 * S.sc;
+    ctx.save(); ctx.globalCompositeOperation = 'source-atop';
+    const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], rr);
+    g.addColorStop(0, css(RPAL.glow, .45 * core)); g.addColorStop(.35, css(RPAL.glow, .16 * core)); g.addColorStop(1, css(RPAL.glow, 0));
+    ctx.fillStyle = g; ctx.fillRect(c[0] - rr, c[1] - rr, rr * 2, rr * 2); ctx.restore();
+  }
+  out.F = F;
+  return out;
+}
+
+/* additive bloom for glowing parts, drawn on the final frame */
+function glowBloom(ctx, x, y, r, a, col = RPAL.glow) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, css(col, .55 * a)); g.addColorStop(.25, css(col, .22 * a)); g.addColorStop(1, css(col, 0));
+  ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2); ctx.restore();
+}
+/* ============================================================
+   BACKGROUNDS — painted once at load (gouache simulation)
+   ============================================================ */
+const BG = {};
+const PAL = {
+  farF: ['#6c8197', '#7c90a2', '#a2adb4', '#d9cbb6'],
+  midF: ['#2b4350', '#3c5a5d', '#5d7b6d', '#b4b496'],
+  midW: ['#2e4a46', '#4b6c58', '#87a06a', '#e2cf8a'],
+  fg: ['#1d2e2c', '#2b4339', '#43603f', '#8e9a5a'],
+  fgGold: ['#22322c', '#344c3a', '#5d7845', '#e6c27a'],
+  grass: ['#4f6a46', '#6a8452', '#8fa25c', '#c8c07a'],
+};
+function ridge(ctx, w, y0, amp, freq, seed, col, h, o = {}) {
+  ctx.beginPath(); ctx.moveTo(0, h);
+  const pts = [];
+  for (let x = 0; x <= w; x += 6) { const y = y0 + amp * fbm(x * freq, 0, seed, 5) + (o.slope || 0) * x; pts.push([x, y]); ctx.lineTo(x, y); }
+  ctx.lineTo(w, h); ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+  return pts;
+}
+function canopyBand(ctx, w, yTop, h, pal, rng, o = {}) {
+  // continuous canopy edge made of crowns, filled below
+  const rmin = o.rmin || 14, rmax = o.rmax || 30;
+  const yAt = x => yTop + (o.amp || 20) * fbm(x * (o.freq || .004), 3, o.seed || 1, 3) + (o.dip ? o.dip(x) : 0);
+  ctx.fillStyle = pal[0];
+  ctx.beginPath(); ctx.moveTo(0, h); for (let x = 0; x <= w; x += 8) ctx.lineTo(x, yAt(x) + rmax * .6); ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+  const rows = o.rows || 3;
+  for (let r = 0; r < rows; r++) {
+    let x = -rmax;
+    while (x < w + rmax) {
+      const R = lerp(rmin, rmax, rng()) * (1 + r * .15);
+      clump(ctx, x, yAt(x) + r * rmax * .9 + R * .3, R, pal, rng, { k: 2 + (rng() * 3 | 0), leaf: o.leaf ?? .8, vary: o.vary ?? 10, lx: o.lx, ly: o.ly });
+      x += R * (1.1 + rng() * .6);
+    }
+  }
+  return yAt;
+}
+function meadow(ctx, x0, y0, w, h, rng, pal, o = {}) {
+  // ground plane with brushwork, receding
+  const g = ctx.createLinearGradient(0, y0, 0, y0 + h);
+  g.addColorStop(0, css(pal[1])); g.addColorStop(1, css(pal[0]));
+  ctx.fillStyle = g; ctx.fillRect(x0, y0, w, h);
+  const n = o.n || 2600;
+  for (let i = 0; i < n; i++) {
+    const t = Math.pow(rng(), .8), y = y0 + t * h, x = x0 + rng() * w, s = .4 + t * 1.6;
+    const lit = o.lit ? o.lit(x, y) : .3;
+    const c = rng() < lit ? (rng() < .25 ? pal[3] : pal[2]) : (rng() < .5 ? pal[1] : pal[0]);
+    bstroke(ctx, x, y, x + (rng() - .5) * 4 * s, y - (4 + rng() * 10) * s, (1.4 + rng() * 2) * s, vary(c, rng, 14, .85), rng, { segs: 3 });
+  }
+}
+
+/* ---------------- S1: establishing wide, dawn ---------------- */
+async function buildS1(tick) {
+  const w = W + 260, r = RNG(1101);
+  // SKY + clouds + far mountains
+  const sky = mk(w, H), s = sky.getContext('2d');
+  paintSky(s, w, H, [[0, '#7b8fab'], [.26, '#a3adc0'], [.44, '#d6bfb6'], [.55, '#efd0a7'], [.62, '#fae3b4'], [1, '#f2dfbb']], r, { n: 1100 });
+  softDot(s, 1500, 600, 620, '#fff3cf', .55); softDot(s, 1500, 610, 260, '#fff8e2', .6);
+  cloud(s, 420, 150, 1100, 150, ['#8b88a8', '#c3a2ae', '#efc0a2', '#fde0b4'], r, { lx: .5, ly: .7, ex: 1.6 });
+  cloud(s, 1180, 90, 700, 90, ['#9590ad', '#c8a8b2', '#f0c4a6', '#fde4b8'], r, { lx: .6, ly: .7, ex: 1.8 });
+  for (let i = 0; i < 9; i++) cloud(s, 700 + r() * 1500, 330 + r() * 150, 300 + r() * 500, 22 + r() * 18, ['#b8a0ae', '#ddb4a6', '#f8d4a4', '#fff0cc'], r, { lx: .4, ly: .9, ex: 3.4, puffy: .3 });
+  await tick();
+  const rg1 = ridge(s, w, 505, 70, .0022, 5, '#9aa0bb', H);
+  for (let i = 0; i < rg1.length - 1; i += 2) { const [x, y] = rg1[i], dy = rg1[i + 1][1] - y; if (dy < -.3) bstroke(s, x, y + 3, x + 12, y + 3 + r() * 6, 3 + r() * 3, vary('#c4b4c4', r, 8, .6), r, { segs: 3 }); }
+  ridge(s, w, 560, 40, .003, 9, '#8892b0', H);
+  const mg = s.createLinearGradient(0, 520, 0, 660); mg.addColorStop(0, 'rgba(236,222,206,0)'); mg.addColorStop(1, 'rgba(236,222,206,.9)'); s.fillStyle = mg; s.fillRect(0, 520, w, H - 520);
+  paperTex(s, w, H, r, .05);
+  BG.s1sky = sky; await tick();
+  // FAR FOREST
+  const far = mk(w, H), f = far.getContext('2d');
+  canopyBand(f, w, 612, H, PAL.farF, r, { rmin: 10, rmax: 22, amp: 22, seed: 4, rows: 3, leaf: .7, lx: .7, ly: -.6 });
+  const fg2 = f.createLinearGradient(0, 600, 0, 760); fg2.addColorStop(0, 'rgba(230,214,196,.25)'); fg2.addColorStop(1, 'rgba(230,214,196,.75)'); f.globalCompositeOperation = 'source-atop'; f.fillStyle = fg2; f.fillRect(0, 590, w, H); f.globalCompositeOperation = 'source-over';
+  BG.s1far = far; await tick();
+  // MID: forest wall behind the clearing + meadow
+  const mid = mk(w, H), m = mid.getContext('2d');
+  const dip = x => 90 * Math.exp(-Math.pow((x - 860) / 330, 2));
+  canopyBand(m, w, 660, H, PAL.midF, r, { rmin: 26, rmax: 52, amp: 40, seed: 8, rows: 3, dip, leaf: .9 });
+  await tick();
+  // trunks peeking under the canopy
+  for (let i = 0; i < 26; i++) { const x = r() * w; if (Math.abs(x - 860) < 260) continue; trunkShape(m, x, 830, 700 + r() * 40, 10 + r() * 10, 6, ['#2c3a40', '#46545a', '#6f7a72'], r, { seed: i }); }
+  meadow(m, 0, 800, w, H - 800, r, ['#3e5650', '#506a5c', '#6c8466', '#a8ad8a'], { n: 3600, lit: (x, y) => .2 + .4 * Math.exp(-Math.pow((x - 1250) / 400, 2)) });
+  for (let i = 0; i < 60; i++) grassTuft(m, r() * w, 810 + r() * 60, 10 + r() * 14, 5, ['#3e5650', '#506a5c', '#6c8466'], r);
+  for (let i = 0; i < 40; i++) flowersDots(m, r() * w, 820 + r() * 140, 20, 4, r() < .7 ? '#efe8d6' : '#e8cf6a', r);
+  // side trees in the clearing, bigger, with lit crowns
+  for (const [x, by, hh, R] of [[150, 860, 360, 120], [330, 840, 280, 90], [1500, 850, 330, 110], [1690, 870, 420, 140], [1880, 860, 380, 120]]) {
+    trunkShape(m, x, by, by - hh, 26 + R * .1, 10, ['#2b3437', '#4b5552', '#857f6c', '#1f2629'], r, { seed: x, moss: '#5d7a4a', side: 1 });
+    clump(m, x - R * .3, by - hh, R, PAL.midF, r, { leaf: 1 }); clump(m, x + R * .4, by - hh + R * .3, R * .8, PAL.midF, r, { leaf: 1 });
+    clump(m, x, by - hh - R * .45, R * .75, PAL.midW, r, { leaf: 1 });
+  }
+  paperTex(m, w, H, r, .05);
+  BG.s1mid = mid; await tick();
+  // FOREGROUND framing
+  const fgc = mk(w, H), g = fgc.getContext('2d');
+  // ground ferns band
+  g.fillStyle = '#22332d';
+  g.beginPath(); g.moveTo(0, H); for (let x = 0; x <= w; x += 10) g.lineTo(x, 955 + 30 * fbm(x * .006, 1, 33, 3) - 40 * Math.exp(-Math.pow((x - 300) / 300, 2)) - 30 * Math.exp(-Math.pow((x - 1600) / 260, 2))); g.lineTo(w, H); g.fill();
+  for (let i = 0; i < 70; i++) { const x = r() * w, y = 950 + r() * 90; fern(g, x, y, 60 + r() * 80, -Math.PI / 2 + (r() - .5) * 1.6, ['#24392f', '#33503d', '#4c6a45'], r, { curl: (r() - .5) * 1.4 }); }
+  for (let i = 0; i < 50; i++) grassTuft(g, r() * w, 990 + r() * 50, 40 + r() * 40, 7, ['#24382f', '#35513d', '#5a7448'], r);
+  // big left tree
+  trunkShape(g, 110, H + 20, -40, 150, 110, ['#1d2426', '#2f3a3a', '#57605a', '#141a1c'], r, { seed: 77, moss: '#3f5a40', side: 1 });
+  for (let i = 0; i < 9; i++) clump(g, -60 + r() * 640, -40 + r() * 170, 90 + r() * 60, PAL.fg, r, { leaf: 1.1 });
+  // right tree
+  trunkShape(g, w - 90, H + 20, -40, 120, 90, ['#1d2426', '#2f3a3a', '#57605a', '#141a1c'], r, { seed: 78, moss: '#3f5a40', side: -1 });
+  for (let i = 0; i < 7; i++) clump(g, w - 420 + r() * 520, -50 + r() * 150, 80 + r() * 60, PAL.fg, r, { leaf: 1.1 });
+  // hanging leafy branch from top-left
+  for (let i = 0; i < 12; i++) clump(g, 300 + i * 38 + r() * 20, 120 + i * 9 + r() * 30, 26 + r() * 16, PAL.fg, r, { leaf: 1.2 });
+  BG.s1fg = fgc; await tick();
+  // mist sprites
+  BG.mistA = mistBand(2400, 260, '#efe4d6', r, { a: .28 });
+  BG.mistB = mistBand(2400, 200, '#f4ead8', r, { a: .3 });
+  BG.mistG = mistBand(2400, 240, '#fff0cc', r, { a: .3 });
+}
+
+/* ---------------- S2: forest interior behind head MCU ---------------- */
+async function buildS2(tick) {
+  const r = RNG(2202), c = mk(W + 120, H), x = c.getContext('2d'), w = W + 120;
+  const g = x.createLinearGradient(0, 0, w, 0); g.addColorStop(0, '#34494f'); g.addColorStop(.6, '#4d6461'); g.addColorStop(1, '#8e957c');
+  x.fillStyle = g; x.fillRect(0, 0, w, H);
+  // bright sky opening, upper right
+  softDot(x, 1650, 240, 700, '#f6dfa8', .9); softDot(x, 1750, 200, 380, '#fff3d0', .9);
+  for (let i = 0; i < 300; i++) { const px = 1100 + r() * 900, py = r() * 600; bstroke(x, px, py, px + 40 + r() * 80, py + (r() - .5) * 10, 6 + r() * 10, vary('#f1d9a6', r, 14, .3), r); }
+  // far soft trunks
+  for (let i = 0; i < 18; i++) { const px = r() * w, wd = 20 + r() * 40; trunkShape(x, px, H + 10, -20, wd, wd * .8, [px > 1200 ? '#7b8476' : '#3e4f53', px > 1200 ? '#8f9682' : '#4d5f60', null], r, { seed: i + 40 }); }
+  x.fillStyle = 'rgba(210,214,196,.25)'; x.fillRect(0, 0, w, H);
+  // foliage masses
+  for (let i = 0; i < 34; i++) { const px = r() * w, py = -60 + r() * (px > 1250 ? 160 : 380) ; const warm = px > 1200; clump(x, px, py, 80 + r() * 90, warm ? ['#5f6f5a', '#7f8c6c', '#b9b689', '#f4dda4'] : ['#2f4448', '#3f5a54', '#5e7964', '#a7a982'], r, { leaf: .9, vary: 8 }); }
+  for (let i = 0; i < 10; i++) { const px = r() * 1100, py = 420 + r() * 300; clump(x, px, py, 50 + r() * 50, ['#33494c', '#40585a', '#5a7266', '#98a084'], r, { leaf: .9, vary: 8 }); }
+  // nearer trunks, dark
+  for (const px of [140, 520, 1460]) trunkShape(x, px, H + 10, -20, 70, 58, ['#263236', '#36464a', '#5c6862'], r, { seed: px, moss: '#4a6448' });
+  x.fillStyle = 'rgba(200,210,200,.12)'; x.fillRect(0, 0, w, H);
+  paperTex(x, w, H, r, .05);
+  BG.s2 = c; await tick();
+}
+
+/* ---------------- S5: low-angle, rise ---------------- */
+async function buildS5(tick) {
+  const r = RNG(5505), w = W + 80, h = H + 360, c = mk(w, h), x = c.getContext('2d');
+  paintSky(x, w, h, [[0, '#c8c6bc'], [.18, '#f2d9a8'], [.4, '#fbe6b8'], [.6, '#f3d8a8'], [1, '#d9c3a0']], r, { n: 700 });
+  softDot(x, 1250, 330, 700, '#fff5d6', .8);
+  cloud(x, 1300, 220, 600, 70, ['#d4b0a2', '#ecc6a2', '#fde2b0', '#fff6dc'], r, { lx: -.3, ly: .8, ex: 2.6, puffy: .4 });
+  await tick();
+  // distant tree line behind robot
+  canopyBand(x, w, 760, h, ['#6d7f84', '#82938e', '#b5b49c', '#f0d9a6'], r, { rmin: 22, rmax: 44, amp: 30, seed: 12, rows: 2, leaf: .8 });
+  const mg = x.createLinearGradient(0, 740, 0, 1000); mg.addColorStop(0, 'rgba(250,232,196,.2)'); mg.addColorStop(1, 'rgba(250,232,196,.8)'); x.fillStyle = mg; x.fillRect(0, 740, w, h - 740);
+  canopyBand(x, w, 1020, h, ['#4a6156', '#5f7a64', '#8fa070', '#e8d095'], r, { rmin: 30, rmax: 60, amp: 30, seed: 13, rows: 3, leaf: .9 });
+  await tick();
+  // side trees converging upward (low angle)
+  for (const [bx, tx, wd] of [[60, 260, 120], [330, 440, 70], [w - 70, w - 300, 130], [w - 360, w - 470, 70]]) {
+    const segs = 20, L = [], R = [];
+    for (let i = 0; i <= segs; i++) { const t = i / segs, y = lerp(h, -40, t), cx = lerp(bx, tx, t * t * .6 + t * .4), ww = lerp(wd, wd * .45, t); L.push([cx - ww / 2, y]); R.push([cx + ww / 2, y]); }
+    x.beginPath(); x.moveTo(...L[0]); for (const p of L) x.lineTo(...p); for (let i = R.length - 1; i >= 0; i--) x.lineTo(...R[i]); x.closePath(); x.fillStyle = '#26302f'; x.fill();
+    x.save(); x.clip(); const side = bx < w / 2 ? 1 : -1;
+    for (let i = 0; i < segs; i++) { const a = side > 0 ? R[i] : L[i], b = side > 0 ? R[i + 1] : L[i + 1]; bstroke(x, a[0] - side * 8, a[1], b[0] - side * 8, b[1], 10, vary('#a8956a', r, 12, .8), r, { taper: 0 }); bstroke(x, a[0] - side * 3, a[1], b[0] - side * 3, b[1], 4, vary('#f0cf8a', r, 12, .9), r, { taper: 0 }); }
+    for (let i = 0; i < 90; i++) { const yy = r() * h; bstroke(x, bx + (r() - .5) * wd, yy, bx + (r() - .5) * wd, yy - 20 - r() * 30, 2 + r() * 3, vary('#1a2020', r, 10, .7), r); }
+    x.restore();
+  }
+  for (let i = 0; i < 16; i++) { const left = i % 2 === 0; clump(x, left ? r() * 520 - 60 : w - r() * 520 + 60, r() * 360 - 60, 90 + r() * 80, PAL.fgGold, r, { leaf: 1.1, lx: left ? .8 : -.2, ly: .3 }); }
+  paperTex(x, w, h, r, .05);
+  BG.s5 = c; await tick();
+  // foreground ferns (separate layer)
+  const f = mk(w, 420), fx = f.getContext('2d');
+  fx.fillStyle = '#1e2c27'; fx.beginPath(); fx.moveTo(0, 420); for (let xx = 0; xx <= w; xx += 10) fx.lineTo(xx, 250 + 50 * fbm(xx * .005, 2, 55, 3)); fx.lineTo(w, 420); fx.fill();
+  for (let i = 0; i < 90; i++) fern(fx, r() * w, 300 + r() * 120, 120 + r() * 140, -Math.PI / 2 + (r() - .5) * 1.5, ['#203229', '#2f4a39', '#4c6a44', '#7d8f52'], r, { curl: (r() - .5) * 1.4, lw: 30 });
+  for (let i = 0; i < 40; i++) grassTuft(fx, r() * w, 330 + r() * 90, 80 + r() * 70, 8, ['#203229', '#33503b', '#6c8048'], r);
+  BG.s5fg = f;
+}
+
+/* ---------------- S6b: looking up through the canopy gap ---------------- */
+async function buildS6b(tick) {
+  const r = RNG(6606), c = mk(W + 200, H + 200), x = c.getContext('2d'), w = W + 200, h = H + 200, cx = w * .55, cy = h * .45;
+  const g = x.createRadialGradient(cx, cy, 0, cx, cy, 900); g.addColorStop(0, '#fffbe8'); g.addColorStop(.25, '#fbe7b4'); g.addColorStop(.6, '#efc98e'); g.addColorStop(1, '#c9a07a');
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+  for (let i = 0; i < 400; i++) { const a = r() * TAU, d = 100 + r() * 700, px = cx + Math.cos(a) * d, py = cy + Math.sin(a) * d * .8; bstroke(x, px, py, px + Math.cos(a + 1.57) * 60, py + Math.sin(a + 1.57) * 60, 6 + r() * 8, vary('#f5d9a0', r, 14, .3), r); }
+  cloud(x, cx - 120, cy + 120, 420, 60, ['#e6c0a0', '#f6d6aa', '#fff0cc', '#ffffff'], r, { ex: 2.5, puffy: .5 });
+  // trunks radiating inward
+  for (let i = 0; i < 9; i++) {
+    const a = i / 9 * TAU + r() * .3, R0 = 1300, R1 = 360 + r() * 120, wd = 70 + r() * 60;
+    const ox = cx + Math.cos(a) * R0, oy = cy + Math.sin(a) * R0, ix = cx + Math.cos(a) * R1, iy = cy + Math.sin(a) * R1;
+    const nx = -Math.sin(a), ny = Math.cos(a);
+    x.beginPath(); x.moveTo(ox + nx * wd, oy + ny * wd); x.lineTo(ix + nx * wd * .25, iy + ny * wd * .25); x.lineTo(ix - nx * wd * .25, iy - ny * wd * .25); x.lineTo(ox - nx * wd, oy - ny * wd); x.closePath();
+    x.fillStyle = '#2a2a2a'; x.fill(); x.save(); x.clip();
+    for (let k = 0; k < 40; k++) { const t = r(), px = lerp(ox, ix, t) + nx * (r() - .5) * wd * (1 - t * .7), py = lerp(oy, iy, t) + ny * (r() - .5) * wd * (1 - t * .7); bstroke(x, px, py, px + (ix - ox) * .04, py + (iy - oy) * .04, 3, vary('#4a403a', r, 10, .8), r); }
+    bstroke(x, ox + nx * wd * .7, oy + ny * wd * .7, ix + nx * wd * .2, iy + ny * wd * .2, 8, vary('#d9a560', r, 10, .7), r, { taper: .3 });
+    x.restore();
+  }
+  await tick();
+  // ring of crowns, backlit
+  for (let i = 0; i < 46; i++) {
+    const a = r() * TAU, d = 480 + r() * 520, px = cx + Math.cos(a) * d * 1.25, py = cy + Math.sin(a) * d;
+    const lx = -Math.cos(a), ly = -Math.sin(a);
+    clump(x, px, py, 110 + r() * 110, ['#1f2d27', '#2f4534', '#55703f', '#f2d27e'], r, { leaf: 1.2, lx, ly, sq: 1 });
+  }
+  paperTex(x, w, h, r, .05);
+  BG.s6b = c; await tick();
+}
+
+/* ---------------- S7: high angle over the forest sea ---------------- */
+async function buildS7(tick) {
+  const r = RNG(7707), w = W + 120, c = mk(w, H + 80), x = c.getContext('2d'), h = H + 80;
+  paintSky(x, w, 300, [[0, '#a9b6c8'], [.5, '#ecd2aa'], [.9, '#fde7b6'], [1, '#fff1cc']], r, { n: 300 });
+  softDot(x, 1500, 250, 500, '#fff3cc', .8); softDot(x, 1500, 255, 120, '#ffffff', .9);
+  for (let i = 0; i < 5; i++) cloud(x, r() * w, 80 + r() * 120, 300 + r() * 300, 20, ['#c9a7a8', '#e8c1a6', '#fadcac', '#fff3d2'], r, { ex: 3.5, puffy: .3 });
+  ridge(x, w, 225, 26, .004, 21, '#a3a7bf', h); ridge(x, w, 245, 18, .006, 22, '#8f9ab4', h);
+  // canopy base
+  const g = x.createLinearGradient(0, 250, 0, h); g.addColorStop(0, '#8b9aa0'); g.addColorStop(.2, '#56705f'); g.addColorStop(1, '#22352e');
+  x.fillStyle = g; x.fillRect(0, 258, w, h);
+  canopyBand(x, w, 262, 360, ['#7f9097', '#94a3a0', '#c2c0a6', '#f3dcae'], r, { rmin: 6, rmax: 12, amp: 6, rows: 3, leaf: .6, seed: 4 });
+  for (let row = 0; row < 26; row++) { const y = 300 + row * row * 1.15 + row * 6; if (y > h) break; const R = 8 + row * 2.4; let px = -R; const k = row / 26; while (px < w + R) { clump(x, px, y, R, [mix('#7c8f94', '#203229', Math.min(1, k * 2.4)), mix('#90a39f', '#33503d', Math.min(1, k * 2.4)), mix('#c0c0a4', '#6e8a56', Math.min(1, k * 2.2)), null], r, { leaf: .7, k: 2 }); px += R * 1.3; } }
+  await tick();
+  // clearing
+  x.save(); x.beginPath(); x.ellipse(960, 690, 250, 92, 0, 0, TAU); x.clip();
+  meadow(x, 700, 590, 520, 200, r, ['#4d6845', '#6b8450', '#a6b062', '#e9d690'], { n: 1500, lit: (px) => .5 + (px - 960) / 600 });
+  x.restore();
+  BG.s7 = c;
+  // crown sprites
+  BG.crowns = [];
+  const pals = [['#2a4234', '#3f5f43', '#6f8f4f', '#e9d391'], ['#2c4438', '#47664a', '#7c9858', '#f0d996'], ['#32402e', '#566a3a', '#93a052', '#f3dc8e'], ['#2a3d38', '#3c5a50', '#62806a', '#e3d29a'], ['#2c4236', '#44624a', '#789656', '#ecd894']];
+  for (let i = 0; i < 16; i++) {
+    const sp = mk(200, 180), sx = sp.getContext('2d'), p = pals[i % pals.length];
+    clump(sx, 100, 95, 66, p, r, { leaf: 1, lx: .55, ly: -.83, sq: .75, k: 5 });
+    BG.crowns.push(sp);
+  }
+  await tick();
+}
+
+/* ---------------- S8: launch sky ---------------- */
+async function buildS8(tick) {
+  const r = RNG(8808), w = W + 100, h = H + 60, c = mk(w, h), x = c.getContext('2d');
+  paintSky(x, w, h, [[0, '#93a7c0'], [.22, '#c8c2c0'], [.42, '#efcf9e'], [.62, '#fbe0aa'], [.8, '#fde9bd'], [1, '#f4d6a4']], r, { n: 1200 });
+  softDot(x, 1360, 470, 900, '#ffe9b8', .7); softDot(x, 1360, 470, 300, '#fff7e0', .9); softDot(x, 1360, 470, 90, '#ffffff', 1);
+  cloud(x, 380, 300, 900, 170, ['#b39a9e', '#e2b49c', '#f8d29c', '#fff4d0'], r, { lx: .85, ly: .3, ex: 1.5 });
+  cloud(x, 300, 520, 600, 90, ['#bea2a4', '#e9bea2', '#fbdaa6', '#fff6dc'], r, { lx: .9, ly: .2, ex: 1.8 });
+  cloud(x, 1750, 230, 500, 120, ['#b09aa2', '#e2b29e', '#f9d29e', '#fff4d0'], r, { lx: -.8, ly: .4, ex: 1.6 });
+  for (let i = 0; i < 8; i++) cloud(x, r() * w, 600 + r() * 160, 300 + r() * 400, 16 + r() * 14, ['#d6b0a4', '#ecc6a2', '#fde1ac', '#fff6dc'], r, { ex: 4, puffy: .2 });
+  await tick();
+  canopyBand(x, w, 830, h, ['#7f8086', '#9a9a94', '#cfc2a2', '#fde6b0'], r, { rmin: 14, rmax: 28, amp: 24, rows: 2, leaf: .8, seed: 31, lx: .7, ly: -.6 });
+  const mg = x.createLinearGradient(0, 800, 0, 960); mg.addColorStop(0, 'rgba(255,236,196,0)'); mg.addColorStop(1, 'rgba(255,236,196,.85)'); x.fillStyle = mg; x.fillRect(0, 800, w, h - 800);
+  canopyBand(x, w, 900, h, ['#232c29', '#2f3c34', '#46553f', '#e9b866'], r, { rmin: 40, rmax: 90, amp: 50, rows: 3, leaf: 1, seed: 32, lx: .3, ly: -.95 });
+  paperTex(x, w, h, r, .05);
+  BG.s8 = c; await tick();
+}
+/* ============================================================
+   FX — bird, flock, debris, dust, leaves, flames, rays, rings
+   ============================================================ */
+const BIRD = { back: '#8c6a48', breast: '#e38f55', belly: '#f2e2c4', cap: '#3c302c', wing: '#6c5036', ink: '#2a2026' };
+// small songbird, facing right in model (dir=-1 flips). origin = feet. pose: {body, wing, wingSpread, legs, headTilt, crouch}
+function drawBird(ctx, x, y, s, pose, dir = 1, seed = 1, light = [.75, -.66], warm = 1) {
+  const m = new Mx().t(x, y).s(s * dir, s);
+  const lw = clamp(s * .9, .8, 2.4), jit = Math.min(.5, s * .12);
+  const cool = c => css(mix(c, '#56607a', (1 - warm) * .4));
+  const L = dir > 0 ? light : [-light[0], light[1]];
+  const part = (mm, pts, fill, sh = 4, extra) => {
+    const d = prep(mm, pts, true, seed, jit, 1.5), path = pathOf(d);
+    ctx.fillStyle = cool(fill); ctx.fill(path);
+    ctx.save(); ctx.clip(path);
+    if (extra) extra(mm);
+    if (sh) { const k = sh * s; ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = MUL_SHADE; const p2 = new Path2D(); p2.addPath(path); p2.addPath(shifted(path, light[0] * k, light[1] * k)); ctx.fill(p2, 'evenodd'); ctx.globalCompositeOperation = 'source-over'; }
+    ctx.restore();
+    ink(ctx, d, { closed: true, w: lw, col: BIRD.ink, seed, light, sw: .5, var: .2 });
+  };
+  const ba = pose.body || 0, cr = pose.crouch || 0;
+  const B = m.t(0, -14 + cr * 3).r(ba);
+  const legs = pose.legs ?? 1;
+  if (legs > 0) {
+    for (const lx of [-2, 3]) { const a = B.p(lx, 6), b = m.p(lx * 1.2 + (pose.legFwd || 0), 0); ctx.strokeStyle = BIRD.ink; ctx.lineWidth = Math.max(.8, lw * .8); ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke(); }
+  }
+  const wingFar = pose.wing != null && pose.wingSpread;
+  const wingPts = [[0, 0], [-6, -26], [4, -30], [12, -24], [10, -4]];
+  if (wingFar) part(B.t(2, -4).r(pose.wing - .35).s(.8, .9), wingPts, BIRD.wing, 3);
+  part(B, [[-6, 0], [-26, 6], [-27, 10], [-21, 10], [-4, 6]], BIRD.wing, 2);       // tail
+  part(B, ell(0, 0, 13, 9.5, 14), BIRD.back, 7, mm => {                            // body
+    const p = prep(mm, ell(5, 4, 10, 7, 12), true, seed + 1, 0, 2); ctx.fillStyle = cool(BIRD.breast); ctx.fill(pathOf(p));
+    const q = prep(mm, ell(2, 7, 9, 4, 10), true, seed + 2, 0, 2); ctx.fillStyle = cool(BIRD.belly); ctx.fill(pathOf(q));
+  });
+  const Hh = B.t(10, -8 - cr * 2).r(pose.headTilt || 0);
+  part(Hh, [[7, -1.5], [13.5, 0.5], [7, 2.5]], '#d8a050', 0);                         // beak
+  part(Hh, ell(0, 0, 7.5, 7, 12), BIRD.back, 4, mm => {
+    const p = prep(mm, ell(-1, -5, 8, 4, 10), true, seed + 3, 0, 2); ctx.fillStyle = cool(BIRD.cap); ctx.fill(pathOf(p));
+    const q = prep(mm, ell(2, 3.5, 6, 3.5, 10), true, seed + 4, 0, 2); ctx.fillStyle = cool(BIRD.breast); ctx.fill(pathOf(q));
+  });
+  const e = Hh.p(3, -1); ctx.fillStyle = '#121014'; ctx.beginPath(); ctx.arc(e[0], e[1], Math.max(1, 1.7 * s), 0, TAU); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(e[0] + .5 * s * dir, e[1] - .6 * s, Math.max(.4, .55 * s), 0, TAU); ctx.fill();
+  if (pose.wing != null) part(B.t(-1, -3).r(pose.wing), wingPts, BIRD.wing, 3, mm => { if (s > 2) { ctx.strokeStyle = 'rgba(40,30,30,.5)'; ctx.lineWidth = .7; for (let k = 0; k < 3; k++) { const a = mm.p(-2 + k * 4, -22 + k * 2), b = mm.p(2 + k * 3, -4); ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke(); } } });
+  else part(B, [[-9, -4], [6, -6], [10, 0], [2, 5], [-14, 3]], BIRD.wing, 3);     // folded wing
+}
+const FLAP = [-2.5, -1.2, .3, 1.15, .4, -1.3]; // wing angles cycle (drawn on ones)
+// distant flock bird silhouette
+function flockBird(ctx, x, y, s, ph, dir, col) {
+  const k = Math.floor(ph) % 4, wy = [-1, -.3, .7, -.2][k], wx = [.8, 1, .85, 1][k];
+  ctx.fillStyle = col; ctx.beginPath();
+  ctx.ellipse(x, y, s * .9, s * .35, 0, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x - s * .3, y);
+  ctx.quadraticCurveTo(x - s * .9 * wx, y + wy * s * .9, x - s * 2.1 * wx, y + wy * s * 1.6);
+  ctx.quadraticCurveTo(x - s * .6, y + wy * s * .4, x + s * .3, y);
+  ctx.quadraticCurveTo(x + s * .9 * wx, y + wy * s * .9, x + s * 2.1 * wx, y + wy * s * 1.6);
+  ctx.quadraticCurveTo(x + s * .6, y + wy * s * .4, x - s * .3, y); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x + dir * s * .8, y - s * .1); ctx.lineTo(x + dir * s * 1.3, y - s * .25); ctx.lineTo(x + dir * s * .8, y + s * .2); ctx.fill();
+}
+
+/* ---- debris (cel chunks, ballistic, analytic) ---- */
+function makeDebris(seed, n, spawn) { const r = RNG(seed), o = []; for (let i = 0; i < n; i++) o.push(spawn(r, i)); return o; }
+const DEB_COL = { dirt: ['#6e5440', '#4a3a34'], moss: ['#7f9845', '#4f6a3f'], stone: ['#8a8a86', '#5b5d68'], leaf: ['#7aa04e', '#4c6e40'], leafY: ['#d8b84a', '#a07a34'] };
+function drawDebris(ctx, list, t, o = {}) {
+  const g = o.g ?? 900;
+  for (const d of list) {
+    const u = t - d.t0; if (u < 0 || u > (d.life || 4)) continue;
+    let x, y, rot;
+    if (d.kind === 'leaf' || d.kind === 'leafY') {
+      const fall = 70 + d.sz * 2;
+      x = d.x + d.vx * (1 - Math.exp(-u * 1.5)) / 1.5 + Math.sin(u * d.f + d.ph) * d.sway;
+      y = d.y + d.vy * (1 - Math.exp(-u * 2)) / 2 + fall * u;
+      rot = d.rot + Math.sin(u * d.f * .8 + d.ph) * 1.2;
+      const flip = Math.cos(u * d.f + d.ph);
+      leafShape(ctx, x, y, d.sz, rot, flip, DEB_COL[d.kind], o.lw || 1);
+    } else {
+      x = d.x + d.vx * u; y = d.y + d.vy * u + .5 * g * u * u; rot = d.rot + d.vr * u;
+      if (o.floor != null && y > o.floor) continue;
+      chunk(ctx, x, y, d.sz, rot, DEB_COL[d.kind], d.seed, o.lw || 1);
+    }
+  }
+}
+function chunk(ctx, x, y, s, rot, col, seed, lw) {
+  const r = RNG(seed), n = 6, pts = [];
+  for (let i = 0; i < n; i++) { const a = i / n * TAU + r() * .4, rr = s * (.6 + .5 * r()); pts.push([x + Math.cos(a + rot) * rr, y + Math.sin(a + rot) * rr]); }
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath();
+  ctx.fillStyle = col[0]; ctx.fill();
+  ctx.save(); ctx.clip(); ctx.fillStyle = col[1]; ctx.beginPath(); ctx.arc(x - s * .5, y + s * .5, s * .9, 0, TAU); ctx.fill(); ctx.restore();
+  if (s > 3) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath(); ctx.lineWidth = lw; ctx.strokeStyle = '#2a2026'; ctx.stroke(); }
+}
+function leafShape(ctx, x, y, s, rot, flip, col, lw, glow) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(1, Math.max(.08, Math.abs(flip)));
+  ctx.beginPath(); ctx.moveTo(-s, 0); ctx.quadraticCurveTo(0, -s * .55, s, 0); ctx.quadraticCurveTo(0, s * .55, -s, 0);
+  ctx.fillStyle = flip > 0 ? col[0] : col[1]; ctx.fill();
+  if (s > 4) {
+    ctx.save(); ctx.clip(); ctx.fillStyle = 'rgba(30,40,60,.25)'; ctx.fillRect(-s, 0, s * 2, s); ctx.restore();
+    ctx.lineWidth = lw * .8 / Math.max(.3, Math.abs(flip)); ctx.strokeStyle = 'rgba(42,32,38,.85)'; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s * 1.15, 0); ctx.lineTo(s * .8, 0); ctx.lineWidth = lw * .5; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ---- dust puffs (cel smoke, no line, 2 tones) ---- */
+function dustPuff(ctx, x, y, r, u, seed, cols = ['#cbb79a', '#8e7f80'], light = [.7, -.7], alpha = .8) {
+  // u = 0..1 lifetime; grows, thins out
+  if (u <= 0 || u >= 1) return;
+  u = Math.floor(u * 16) / 16; // effects held on twos/threes
+  const rr = RNG(seed), n = 7, R = r * (.4 + .9 * EZ.out(u)), br = Math.max(0, (u - .6) / .4) * .5;
+  const S = Math.ceil(R * 2.6 + 4); if (!dustPuff.c || dustPuff.c.width < S) dustPuff.c = mk(Math.max(S, 256), Math.max(S, 256));
+  const dc = dustPuff.c, dx = dc.getContext('2d'); dx.clearRect(0, 0, S, S);
+  const fa = alpha * (1 - Math.pow(Math.max(0, (u - .35) / .65), 1.5)), ox = x, oy = y; x = S / 2; y = S / 2 + u * r * .3; const out = ctx; ctx = dx;
+  for (let i = 0; i < n; i++) {
+    const a = rr() * TAU, d = R * .55 * rr(), cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d * .7 - u * r * .6, pr = R * (.45 + .3 * rr()) * (1 - br * .9);
+    if (pr < 1) continue;
+    ctx.fillStyle = cols[1]; ctx.beginPath(); ctx.arc(cx, cy, pr, 0, TAU); ctx.fill();
+    ctx.fillStyle = cols[0]; ctx.beginPath(); ctx.arc(cx + light[0] * pr * .25, cy + light[1] * pr * .25, pr * .78, 0, TAU); ctx.fill();
+  }
+  out.save(); out.globalAlpha = fa; out.drawImage(dc, 0, 0, S, S, ox - S / 2, oy - S / 2 - u * r * .3, S, S); out.restore();
+}
+
+/* ---- flames: layered teardrops redrawn on twos ---- */
+function flame(ctx, x, y, len, wid, ang, seed, k = 1) {
+  const r = RNG(seed);
+  const layers = [['#ff9a40', 1], ['#ffd56a', .72], ['#fffbe8', .42]];
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  for (const [col, f] of layers) {
+    const L = len * f * (.85 + .3 * r()), Wd = wid * f, pts = [];
+    const n = 9;
+    for (let i = 0; i <= n; i++) { const t = i / n, w = Wd * Math.sin(Math.PI * Math.pow(t, .55)) * (1 - t * .2); pts.push([-w * (1 + (r() - .5) * .3), t * L]); }
+    for (let i = n; i >= 0; i--) { const t = i / n, w = Wd * Math.sin(Math.PI * Math.pow(t, .55)) * (1 - t * .2); pts.push([w * (1 + (r() - .5) * .3), t * L]); }
+    ctx.beginPath(); ctx.moveTo(-Wd * .6, 0); for (const p of pts) ctx.lineTo(p[0], p[1]); ctx.closePath();
+    ctx.fillStyle = col; ctx.globalAlpha = k; ctx.fill();
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+/* ---- god rays (soft painted wedges) ---- */
+function godRays(ctx, ox, oy, ang, spread, n, len, a, seed, col = '#fff1c6') {
+  if (a <= 0) return;
+  const r = RNG(seed);
+  ctx.save(); ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < n; i++) {
+    const aa = ang + (r() - .5) * spread, w = .012 + r() * .04, L = len * (.6 + .4 * r());
+    const g = ctx.createLinearGradient(ox, oy, ox + Math.cos(aa) * L, oy + Math.sin(aa) * L);
+    const al = a * (.25 + .6 * r());
+    g.addColorStop(0, css(col, al)); g.addColorStop(.6, css(col, al * .4)); g.addColorStop(1, css(col, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(ox, oy);
+    ctx.lineTo(ox + Math.cos(aa - w) * L, oy + Math.sin(aa - w) * L); ctx.lineTo(ox + Math.cos(aa + w) * L, oy + Math.sin(aa + w) * L); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function sparkle(ctx, x, y, s, a, col = '#ffffff') {
+  if (a <= 0 || s <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = a; ctx.fillStyle = col;
+  for (const [l, w, rot] of [[s, s * .07, 0], [s, s * .07, Math.PI / 2], [s * .5, s * .05, Math.PI / 4], [s * .5, s * .05, -Math.PI / 4]]) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.beginPath(); ctx.moveTo(-l, 0); ctx.quadraticCurveTo(0, -w, l, 0); ctx.quadraticCurveTo(0, w, -l, 0); ctx.fill(); ctx.restore();
+  }
+  ctx.restore();
+  glowBloom(ctx, x, y, s * .8, a * .8, '#fff4d0');
+}
+// motes in sunbeam
+function motes(ctx, t, n, box, seed, a = .8) {
+  const r = RNG(seed);
+  ctx.save(); ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < n; i++) {
+    const bx = r(), by = r(), sp = .3 + r(), ph = r() * TAU, sz = .8 + r() * 2.2;
+    const x = box[0] + ((bx * box[2] + Math.sin(t * .5 * sp + ph) * 30 + t * 6 * sp) % box[2]), y = box[1] + ((by * box[3] + t * 10 * sp + Math.cos(t * .7 + ph) * 12) % box[3]);
+    const tw = .5 + .5 * Math.sin(t * 3 * sp + ph);
+    ctx.fillStyle = `rgba(255,240,200,${a * tw})`; ctx.beginPath(); ctx.arc(x, y, sz, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+// mist drift: tiles a sprite horizontally
+function mistLayer(ctx, spr, y, off, a, sx = 1, sy = 1) {
+  if (a <= 0) return;
+  const w = spr.width * sx; let x = -((off % w) + w) % w - w * .1;
+  ctx.save(); ctx.globalAlpha = a;
+  while (x < W) { ctx.drawImage(spr, x, y, w, spr.height * sy); x += w * .78; }
+  ctx.restore();
+}
+// screen shake on ones (hand-timed: random, decaying)
+function shake(t, amp, freq = 24, seed = 3) { const f = Math.floor(t * freq); return [(hsh(f, seed) - .5) * 2 * amp, (hsh(f, seed + 9) - .5) * 2 * amp]; }
+// stepped time (on twos / threes)
+const onTwos = t => Math.floor(t * 12) / 12;
+const onThrees = t => Math.floor(t * 8) / 8;
+/* ============================================================
+   SHOTS — timeline, staging, camera, timing (24fps, chars on twos)
+   ============================================================ */
+const charC = mk(W, H), litC = mk(W, H), tmpC = mk(W, H), charT = mk(W, H + 600);
+const LIGHT = [.75, -.66];
+function kf(keys, t) { // [[time, value, easeFn?], ...]
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    if (t <= keys[i][0]) { const a = keys[i - 1], b = keys[i], u = (t - a[0]) / (b[0] - a[0]); return lerp(a[1], b[1], (b[2] || EZ.inOut)(u)); }
+  }
+  return keys[keys.length - 1][1];
+}
+function poseSeed(P) { return (Math.round(P.pel) * 3 + Math.round((P.hu || 0) * 40) * 7 + Math.round((P.tilt || 0) * 800) * 11 + Math.round((P.sap || 0) * 60) * 13 + Math.round((P.shR || 0)) * 17 + Math.round((P.aR || 0) * 300) * 19) | 0; }
+function clearC(c) { const x = c.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over'; x.globalAlpha = 1; x.clearRect(0, 0, c.width, c.height); return x; }
+function haze(c, col, a, grad) {
+  const x = c.getContext('2d'); x.save(); x.globalCompositeOperation = 'source-atop';
+  if (a > 0) { x.fillStyle = css(col, a); x.fillRect(0, 0, c.width, c.height); }
+  if (grad) { const g = x.createLinearGradient(0, grad[0], 0, grad[1]); g.addColorStop(0, css(grad[2], 0)); g.addColorStop(1, css(grad[2], grad[3])); x.fillStyle = g; x.fillRect(0, 0, c.width, c.height); }
+  x.restore();
+}
+// cached robot render to a layer
+function robotLayer(c, key, P, V) {
+  if (c._key === key) return c._out;
+  const x = clearC(c); const out = drawRobot(x, P, V); c._key = key; c._out = out; return out;
+}
+// composite lit layer through a light-patch mask
+function throughPatch(ctx, lit, patchFn, dx = 0, dy = 0, s = 1) {
+  const x = clearC(tmpC); if (s !== 1) { x.translate(W / 2, H / 2); x.scale(s, s); x.translate(-W / 2, -H / 2); } x.drawImage(lit, dx, dy); x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'destination-in'; x.fillStyle = '#000'; x.beginPath(); patchFn(x); x.fill('evenodd'); x.globalCompositeOperation = 'source-over';
+  ctx.drawImage(tmpC, 0, 0);
+}
+function patchPoly(x, x0, t, holes = true) {
+  // diagonal sunlight patch (right of a slanted edge) with dappled leaf-shadow holes
+  x.moveTo(x0 - 380, -50); x.lineTo(W + 400, -50); x.lineTo(W + 400, H + 50); x.lineTo(x0 + 420, H + 50); x.closePath();
+  if (holes) { const r = RNG(77); for (let i = 0; i < 9; i++) { const hx = x0 + 100 + r() * 1400 + Math.sin(t * .4 + i) * 14, hy = r() * H, rx = 30 + r() * 90; x.moveTo(hx + rx, hy); x.ellipse(hx, hy, rx, rx * (.35 + r() * .3), r() * 3, 0, TAU); } }
+}
+
+/* vines that persist across drawings of a shot */
+const VINE_DEFS = [
+  { f: 'SR', p: [98, 58], n: 9, seg: 26, id: 1, leaf: 16 }, { f: 'SR', p: [30, 88], n: 6, seg: 22, id: 2 },
+  { f: 'SL', p: [74, 66], n: 11, seg: 24, id: 3, leaf: 15 }, { f: 'SL', p: [-30, 84], n: 5, seg: 20, id: 4 },
+  { f: 'AR', p: [-62, 250], n: 7, seg: 24, id: 5 }, { f: 'AL', p: [52, 244], n: 8, seg: 22, id: 6 },
+  { f: 'T', p: [-206, -190], n: 6, seg: 22, id: 7 }, { f: 'Hd', p: [-100, -112], n: 4, seg: 18, id: 8, leaf: 12 },
+  { f: 'AR', p: [60, 300], n: 9, seg: 24, id: 9 }
+];
+class VineSim {
+  constructor(defs, wind = 0) { this.defs = defs; this.wind = wind; this.reset(); }
+  reset() { this.v = makeVines(this.defs); this.k = -1; }
+  at(tau, poseFn) {
+    const k = Math.floor(tau * 12);
+    if (k < this.k) this.reset();
+    if (this.k < 0) { const F = robotFrames(poseFn(0)); for (let i = 0; i < 40; i++) stepVines(this.v, F, 1 / 12, this.wind, i / 12); this.k = 0; }
+    while (this.k < k) { this.k++; const F = robotFrames(poseFn(this.k / 12)); stepVines(this.v, F, 1 / 12, this.wind, this.k / 12); }
+    return this.v;
+  }
+}
+const KNEEL = { pel: 260, hu: -.25, aR: .1, aL: .1 };
+
+/* ---------- S1 / S4 : the clearing (wide) ---------- */
+const vS1 = new VineSim(VINE_DEFS, 300);
+function sceneClearing(ctx, t, o) {
+  const pan = o.pan, sk = o.shake || [0, 0];
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  const off = p => -20 - p * 200 * (pan / 140) * .7 - (1 - p) * 0;
+  const oSky = -20 - pan * .15, oFar = -40 - pan * .35, oMid = -60 - pan * .65, oFg = -80 - pan;
+  ctx.drawImage(BG.s1sky, oSky - 10, -10, BG.s1sky.width + 20, H + 20);
+  // sun glow behind far hills grows with dawn
+  if (o.dawn > 0) { ctx.save(); ctx.globalCompositeOperation = 'screen'; softDot(ctx, 1500 + oSky, 600, 700, '#ffd890', .55 * o.dawn); softDot(ctx, 1500 + oSky, 590, 160, '#fffbe8', .9 * o.dawn); ctx.restore(); }
+  mistLayer(ctx, BG.mistA, 520, t * 6 - oSky, .6);
+  ctx.drawImage(BG.s1far, oFar, 0);
+  mistLayer(ctx, BG.mistA, 590, t * 11 - oFar, .85);
+  if (o.dawn > 0) godRays(ctx, 1560 + oFar, 600, Math.PI + .12, .5, 9, 1500, .22 * o.dawn, 31, '#ffe6b0');
+  ctx.drawImage(BG.s1mid, oMid, 0);
+  // birds bursting from the forest (behind robot)
+  if (o.flock) o.flock(ctx, oMid);
+  // robot
+  const P = { ...KNEEL, ...(o.pose || {}) };
+  const vines = vS1.at(t, () => P);
+  const rx = 760 + oMid, rx0 = 700, dxr = rx - rx0;
+  const V = { m: new Mx().t(rx0, 990).s(.6), lw: 1.7, light: LIGHT, warm: o.warm, sun: o.sun, seed: poseSeed(P) + 5, eyes: o.eyes || [0, 0], core: o.core || 0, vines };
+  const out0 = robotLayer(charC, `s1|${Math.floor(t * 8)}|${o.warm}|${o.eyes}|${o.core}`, P, V), out = {}; for (const k in out0) if (Array.isArray(out0[k])) out[k] = [out0[k][0] + dxr, out0[k][1]];
+  if (charC._hz !== charC._key) { haze(charC, o.hazeCol, o.haze, [840, 1000, '#e9e2d6', .5]); charC._hz = charC._key; }
+  ctx.drawImage(charC, dxr, 0);
+  if (o.core) glowBloom(ctx, out.core[0], out.core[1], 60, o.core);
+  if (o.eyes && o.eyes[0]) { glowBloom(ctx, out.eye0[0], out.eye0[1], 30, o.eyes[0]); glowBloom(ctx, out.eye1[0], out.eye1[1], 26, o.eyes[1]); }
+  if (o.dust) o.dust(ctx, rx);
+  mistLayer(ctx, BG.mistB, 830, t * 14 - oMid, .7);
+  mistLayer(ctx, BG.mistG, 860, -t * 9 - oMid, .5 + .3 * o.dawn);
+  ctx.drawImage(BG.s1fg, oFg, 0);
+  if (o.leaves) o.leaves(ctx);
+  ctx.restore();
+  return out;
+}
+const S1_LEAVES = makeDebris(11, 7, (r, i) => ({ kind: r() < .7 ? 'leaf' : 'leafY', x: 300 + r() * 1400, y: -40 - r() * 200, vx: 30 + r() * 30, vy: 0, t0: r() * 6, sz: 6 + r() * 6, f: 2 + r() * 2, ph: r() * 6, sway: 30 + r() * 30, rot: r() * 3, life: 8 }));
+function S1(ctx, t) {
+  const u = t / 7.0, pan = 140 * EZ.inOut(u), dawn = sstep(3.5, 7, t) * .6;
+  sceneClearing(ctx, t, {
+    pan, dawn, warm: .12, sun: 0, haze: .18, hazeCol: '#9aa4bc',
+    flock: (c, oMid) => { for (let i = 0; i < 2; i++) { const bt = t - 1.5 - i * .5; if (bt < 0) continue; flockBird(c, 1300 - bt * 70 + i * 40 + oMid * .3, 380 - bt * 8 + i * 14 + Math.sin(bt * 2) * 4, 3.2, bt * 9 + i * 2, -1, 'rgba(60,60,80,.75)'); } },
+    leaves: c => drawDebris(c, S1_LEAVES, onTwos(t), { lw: 1 })
+  });
+  // dawn grade: cool multiply easing, warm screen from right
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = css(mix('#9fa9cc', '#e4dde2', sstep(0, 7, t))); ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'screen'; const g = ctx.createLinearGradient(W, 0, 0, 0); g.addColorStop(0, css('#f0b070', .25 * dawn)); g.addColorStop(.6, css('#f0b070', 0)); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+/* ---------- S2 / S4a : head & shoulder, first light, bird ---------- */
+const vS2 = new VineSim(VINE_DEFS, 250);
+function sceneHead(ctx, tau, o) {
+  const drift = 18 * tau / 6.6, sk = o.shake || [0, 0];
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  ctx.drawImage(BG.s2, -60 + drift * .4, 0);
+  ctx.fillStyle = `rgba(28,36,52,${.32 - .14 * (o.light || 0)})`; ctx.fillRect(0, 0, W, H);
+  const rays = o.light;
+  if (rays > 0) godRays(ctx, 2050, -150, 2.35, .35, 12, 2300, .5 * rays, 41, '#ffe9b8');
+  const P = { ...KNEEL, hu: o.hu ?? -.1, sap: o.sap || 0 };
+  const vines = vS2.at(o.vt ?? tau, () => P);
+  const m = new Mx().t(860, 1653).s(1.45);
+  const base = { m, lw: 3.0, light: LIGHT, seed: poseSeed(P) + 9, eyes: o.eyes || [0, 0], core: o.core || 0, vines, look: o.look, brim: o.brim };
+  const k = `${Math.floor((o.vt ?? tau) * 8)}|${o.eyes}|${o.core}|${P.hu}|${o.look}`;
+  const out0 = robotLayer(charC, 'sh' + k, P, { ...base, warm: .15, sun: 0 }), out = {}; for (const kk in out0) if (Array.isArray(out0[kk])) out[kk] = [out0[kk][0] + drift, out0[kk][1]];
+  if (charC._hz !== charC._key) { haze(charC, '#3c4766', .2); charC._hz = charC._key; }
+  ctx.drawImage(charC, drift, 0);
+  if (o.patch > -1e3) {
+    robotLayer(litC, 'lt' + k, P, { ...base, warm: 1, sun: 1 });
+    throughPatch(ctx, litC, x => patchPoly(x, o.patch + drift, tau), drift, 0);
+  }
+  if (o.core) glowBloom(ctx, out.core[0], out.core[1], 170, o.core);
+  if (o.eyes) { glowBloom(ctx, out.eye0[0], out.eye0[1], 70, o.eyes[0]); glowBloom(ctx, out.eye1[0], out.eye1[1], 60, o.eyes[1]); }
+  ctx.restore();
+  return out;
+}
+function birdArrive(ctx, tau, perch, lit) {
+  const T0 = 3.6, T1 = 4.5;
+  if (tau < T0) return;
+  const f = Math.floor(tau * 24);
+  if (tau < T1) {
+    const u = (tau - T0) / (T1 - T0), e = EZ.out2(u);
+    const p0 = [2060, 250], c1 = [1560, 180], p1 = perch;
+    const x = (1 - e) * (1 - e) * p0[0] + 2 * (1 - e) * e * c1[0] + e * e * p1[0], y = (1 - e) * (1 - e) * p0[1] + 2 * (1 - e) * e * c1[1] + e * e * p1[1] - Math.sin(u * Math.PI) * 30;
+    drawBird(ctx, x, y, 2.0, { body: -.15, wing: FLAP[f % 6], wingSpread: 1, legs: 0 }, -1, f, LIGHT, lit);
+    return;
+  }
+  const u = tau - T1;
+  let pose;
+  if (u < 2 / 24) pose = { body: .45, wing: -2.4, wingSpread: 1, legFwd: 3 };
+  else if (u < 4 / 24) pose = { body: .25, wing: -1.4, wingSpread: 1, crouch: .7 };
+  else if (u < 8 / 24) pose = { body: .05, crouch: .55 };
+  else if (u < 10 / 24) pose = { body: 0, crouch: .2 };
+  else if (u < .95) pose = { body: 0 };
+  else if (u < 1.6) pose = { body: 0, headTilt: -.38 };
+  else if (u < 1.68) pose = { body: 0, headTilt: -.1 };
+  else if (u < 2.3) pose = { body: 0, headTilt: .22 };
+  else pose = { body: 0, headTilt: .05 };
+  drawBird(ctx, perch[0], perch[1], 2.0, pose, -1, u < .5 ? f : 999, LIGHT, lit);
+}
+function S2(ctx, t) {
+  const tau = t - 7.0;
+  const patch = lerp(2300, 520, EZ.out(clamp((tau - 1.0) / 2.8, 0, 1)));
+  const light = sstep(.8, 3.4, tau);
+  const out = sceneHead(ctx, tau, { patch, light, hu: -.1 });
+  motes(ctx, tau, 40, [900, 0, 1000, 900], 5, .7 * light);
+  birdArrive(ctx, tau, out.perch, 1);
+  // glint on lens as the light reaches it
+  const g = tau - 3.05; if (g > 0 && g < .3) sparkle(ctx, out.eye1[0] + 8, out.eye1[1] - 8, 40 * Math.sin(g / .3 * Math.PI), 1);
+}
+function S4a(ctx, t) {
+  const tau = t - 19.6, sk = shake(tau, 7 * (1 - tau / 1.6) + 2, 24, 4);
+  const out = sceneHead(ctx, 6.6 + tau, { patch: 520, light: 1, hu: 0, eyes: [.6, .55], core: .78, shake: sk, look: [.55, -.35], brim: .5, vt: 6.6 + tau });
+  // bird startles and flees
+  const f = Math.floor(tau * 24), p = out.perch;
+  if (tau < .14) drawBird(ctx, p[0] + sk[0], p[1] + sk[1], 2.0, { body: 0, headTilt: -.2 }, -1, 5, LIGHT, 1);
+  else if (tau < .26) drawBird(ctx, p[0] + sk[0], p[1] + sk[1], 2.0, { body: .1, crouch: 1 }, 1, 6, LIGHT, 1);
+  else { const u = tau - .26, x = p[0] + u * 900, y = p[1] - u * 520 - Math.sin(u * 3) * 40; if (x < W + 100) drawBird(ctx, x, y, 2.0 * (1 - u * .2), { body: -.35, wing: FLAP[f % 6], wingSpread: 1, legs: u < .1 ? 1 : 0 }, 1, f, LIGHT, 1); }
+  // dirt sprinkling off the brim & pauldron
+  drawDebris(ctx, DEB_S4a, tau, { g: 1500, lw: 1.4 });
+}
+const DEB_S4a = makeDebris(44, 34, (r, i) => ({ kind: ['dirt', 'moss', 'stone'][i % 3], x: i % 2 ? 1000 + r() * 400 : 640 + r() * 420, y: i % 2 ? 470 + r() * 30 : 300 + r() * 40, vx: (r() - .5) * 80, vy: -40 - r() * 80, t0: r() * 1.2, sz: 2 + r() * 5, rot: r() * 3, vr: (r() - .5) * 8, seed: i + 300, life: 2 }));
+
+/* ---------- S3: chest core awakens ---------- */
+function coreFlicker(tau) {
+  const f = Math.floor(tau * 24);
+  const seq = [[24, .55], [26, 0], [29, .3], [33, 0], [35, .42], [36, .2], [37, .45]];
+  let v = 0; for (const [fr, val] of seq) if (f >= fr) v = val;
+  if (f >= 38) v = lerp(.45, .82, sstep(38, 62, f - f % 2)) + .04 * Math.sin(Math.floor(tau * 8) * 1.1) * (f > 62 ? 1 : 0);
+  return v;
+}
+function S3(ctx, t) {
+  const tau = t - 13.6, sc = 3.3, zm = 1 + .05 * EZ.inOut(tau / 3.2);
+  ctx.drawImage(BG.s2, -200, 0, W + 400, H);
+  ctx.fillStyle = 'rgba(30,40,50,.35)'; ctx.fillRect(0, 0, W, H);
+  const P = { ...KNEEL, hu: -.1 }, core = coreFlicker(tau);
+  const vines = vS2.at(6.6, () => P);
+  const m = new Mx().t(960, 540 + 560 * sc).s(sc);
+  const base = { m, lw: 4.6, light: LIGHT, seed: poseSeed(P) + 9, core, vines, eyes: [0, 0] };
+  const k = `${core.toFixed(3)}`;
+  const out = robotLayer(charC, 'c3' + k, P, { ...base, warm: .2, sun: 0 });
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(zm, zm); ctx.translate(-W / 2, -H / 2); ctx.drawImage(charC, 0, 0); ctx.restore();
+  robotLayer(litC, 'c3l' + k, P, { ...base, warm: 1, sun: 1 });
+  throughPatch(ctx, litC, x => patchPoly(x, 1150, tau), 0, 0, zm);
+  glowBloom(ctx, out.core[0], out.core[1], 420 * (.4 + core), core * 1.1);
+  if (core > .5 && Math.floor(tau * 24) === 24) { ctx.fillStyle = 'rgba(180,255,235,.12)'; ctx.fillRect(0, 0, W, H); }
+  motes(ctx, tau, 70, [700, 0, 1300, 1000], 9, .8);
+}
+
+/* ---------- S3b: the eyes ---------- */
+function S3b(ctx, t) {
+  const tau = t - 16.8, sk = tau > 2.4 ? shake(tau, 4 * sstep(2.4, 2.8, tau), 24, 8) : [0, 0];
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  ctx.drawImage(BG.s2, -260, -200, W + 520, H + 400);
+  ctx.fillStyle = 'rgba(30,40,50,.3)'; ctx.fillRect(0, 0, W, H);
+  const tq = onTwos(tau);
+  const eL = kf([[.5, 0], [.55, .25], [.62, .1], [.7, .45], [1.4, .62]], tq);
+  const eR = kf([[1.0, 0], [1.05, .3], [1.12, .12], [1.2, .5], [1.8, .58]], tq);
+  const lookX = kf([[1.9, 0], [2.15, .6, EZ.out]], tq), lookY = kf([[1.9, 0], [2.15, -.35, EZ.out]], tq);
+  const brim = kf([[1.95, 0], [2.25, .7, EZ.out]], tq);
+  const iris = Math.floor(kf([[1.3, 0], [1.6, 4, EZ.out]], tq)) * .5;
+  const P = { ...KNEEL, hu: 0 };
+  const sc = 3.6, zm = 1 + .025 * EZ.inOut(tau / 2.8);
+  const m = new Mx().t(960, 520 + 807 * sc).s(sc);
+  const base = { m, lw: 5, light: LIGHT, seed: poseSeed(P) + 9, core: .5, eyes: [eL, eR], look: [lookX, lookY], brim, iris, vines: vS2.at(6.6, () => P) };
+  const k = `${eL}|${eR}|${lookX}|${brim}|${iris}`;
+  const out = robotLayer(charC, 'e3' + k, P, { ...base, warm: .25, sun: 0 });
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(zm, zm); ctx.translate(-W / 2, -H / 2); ctx.drawImage(charC, 0, 0); ctx.restore();
+  robotLayer(litC, 'e3l' + k, P, { ...base, warm: 1, sun: 1 });
+  throughPatch(ctx, litC, x => patchPoly(x, 1080, tau, false), 0, 0, zm);
+  glowBloom(ctx, out.eye0[0], out.eye0[1], 260, eL * 1.1); glowBloom(ctx, out.eye1[0], out.eye1[1], 220, eR * 1.1);
+  if (tau > 2.45) drawDebris(ctx, DEB_S3b, tau - 2.45, { g: 2200, lw: 2.2 });
+  ctx.restore();
+}
+const DEB_S3b = makeDebris(55, 22, (r, i) => ({ kind: ['dirt', 'moss', 'stone', 'dirt'][i % 4], x: 300 + r() * 1300, y: 140 + r() * 40, vx: (r() - .5) * 60, vy: r() * 60, t0: r() * .4, sz: 4 + r() * 10, rot: r() * 3, vr: (r() - .5) * 6, seed: i + 500, life: 2 }));
+
+/* ---------- S4: tremor, flock bursts from the trees ---------- */
+const FLOCK = makeDebris(66, 46, (r, i) => ({ x: 120 + r() * 1700, y: 640 + r() * 120, t0: .3 + r() * .9, vx: (r() - .5) * 420, vy: -260 - r() * 260, ph: r() * 4, s: 6 + r() * 4 }));
+const S4_LEAVES = makeDebris(67, 40, (r, i) => ({ kind: r() < .75 ? 'leaf' : 'leafY', x: 100 + r() * 1750, y: 600 + r() * 200, vx: (r() - .5) * 120, vy: -120 - r() * 160, t0: .3 + r() * 1.5, sz: 3 + r() * 4, f: 3 + r() * 3, ph: r() * 6, sway: 20 + r() * 20, rot: r() * 3, life: 5 }));
+const S4_DUST = makeDebris(68, 10, (r, i) => ({ x: (r() - .5) * 420, y: 0, t0: r() * .8, r: 60 + r() * 60, seed: i }));
+function S4(ctx, t) {
+  const tau = t - 21.0, amp = 9 * Math.exp(-tau * .9) + 2, sk = shake(tau, amp, 24, 12);
+  sceneClearing(ctx, t, {
+    pan: 140, dawn: 1, warm: .7, sun: .7, haze: .16, hazeCol: '#d9c8b0', shake: sk, eyes: [.6, .55], core: .78,
+    flock: (c, oMid) => { for (const b of FLOCK) { const u = tau - b.t0; if (u < 0) continue; const x = b.x + oMid + b.vx * u, y = b.y + b.vy * u + 60 * u * u; flockBird(c, x, y, b.s * (1 + u * .1), u * 14 + b.ph, b.vx > 0 ? 1 : -1, 'rgba(48,42,46,.9)'); } },
+    dust: (c, rx) => { for (const d of S4_DUST) dustPuff(c, rx + d.x, 975, d.r * .7, (onTwos(tau) - d.t0) / 2.6, d.seed, ['#e2d2b4', '#a89894'], [.7, -.7], .55); },
+    leaves: c => drawDebris(c, S4_LEAVES, onTwos(tau), { lw: 1 })
+  });
+  ctx.save(); ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,190,110,.35)'; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+/* ---------- S5: the rise ---------- */
+function riseKeys(tq) {
+  const pel = kf([[.8, 260], [1.5, 246, EZ.inOut], [3.4, 402, EZ.inOut], [3.9, 392, EZ.out], [5.6, 614, EZ.inOut], [6.3, 600, EZ.inOut]], tq);
+  const tilt = kf([[1.5, 0], [2.6, -.045], [3.9, -.055], [5.0, .02], [6.3, 0]], tq);
+  const sq = kf([[.8, 0], [1.5, .025], [2.2, -.01], [3.9, .015], [4.5, -.015], [5.6, -.01], [5.8, .02], [6.3, 0]], tq);
+  const sh = kf([[.8, 0], [1.5, 10], [3.4, 4], [5.6, -6], [6.4, 0]], tq);
+  const hu = kf([[.8, -.35], [1.5, -.55], [5.6, -.45], [6.4, -.4]], tq);
+  const aR = kf([[.8, .12], [2.0, .04], [5.6, .02], [6.0, .07], [6.6, .03]], tq);
+  const sap = kf([[1.4, 0], [1.9, -.12], [3.4, .1], [3.9, -.16], [4.6, .08], [5.7, -.18], [6.2, .14], [6.7, -.07], [7.3, .04], [8.0, 0]], tq);
+  return { pel, tilt, sq, shR: sh, shL: sh * 1.1, hu, aR, aL: aR * 1.1, sap };
+}
+const vS5 = new VineSim(VINE_DEFS.map(v => v.id === 1 ? { ...v, cutAt: 4.1 } : v), 120);
+const S5_DEB = makeDebris(77, 90, (r, i) => {
+  const src = [['SR', [r() * 200 - 100, -120 + r() * 60]], ['SL', [r() * 200 - 100, -120 + r() * 60]], ['AR', [r() * 120 - 60, 240]], ['AL', [r() * 120 - 60, 240]], ['T', [r() * 300 - 150, -480]], ['Hd', [r() * 160 - 80, -150]]][i % 6];
+  return { f: src[0], p: src[1], t0: 1.4 + Math.pow(r(), .7) * 5.2, kind: ['dirt', 'moss', 'dirt', 'stone', 'leaf', 'moss', 'leafY'][(r() * 7) | 0], vx: (r() - .5) * 140, vy: -30 - r() * 120, sz: 4 + r() * 12, rot: r() * 3, vr: (r() - .5) * 7, seed: i + 900, f2: 2 + r() * 3, ph: r() * 6, sway: 20 + r() * 30, life: 3.5 };
+});
+const S5_DUST = makeDebris(78, 26, (r, i) => ({ x: 520 + r() * 900, t0: 1.5 + r() * 4.4, r: 70 + r() * 70, seed: i + 40 }));
+function S5(ctx, t) {
+  const tau = t - 24.6, tq = onTwos(tau);
+  const P = riseKeys(tq); P.x = 0;
+  const camY = 360 - 240 * sstep(1.6, 6.8, tau);
+  const quake = tau > 1.4 && tau < 6.3 ? 3 : 0, thump = tau > 5.55 && tau < 5.9 ? 10 * (1 - (tau - 5.55) / .35) : 0;
+  const sk = shake(tau, quake + thump + (tau < 1.4 ? .6 : 0), 24, 21);
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  ctx.drawImage(BG.s5, -40, -camY);
+  godRays(ctx, 1250 - 40, 330 - camY, 1.9, 1.6, 16, 1300, .35, 51, '#fff0c0');
+  const legs = P.pel > 330 ? 'stand' : 'kneel';
+  const vines = vS5.at(tau, tt => { const q = riseKeys(onTwos(tt)); return q; });
+  const TOP = 400, rootY = 1560 - 360 + TOP, dyr = 360 - camY - TOP;
+  const m = new Mx().t(960, rootY).s(.9);
+  const out0 = robotLayer(charT, `r5|${Math.floor(tau * 12)}`, P, { m, lw: 2.4, light: LIGHT, warm: 1, sun: 1, seed: poseSeed(P) + 3, eyes: [.6, .55], core: .8, vines, legs });
+  if (charT._hz !== charT._key) { haze(charT, '#f3ddb4', .1, [1560 - 120 - 420 - dyr * 0 + TOP - 240, 1560 - 120 - 150 + TOP - 240, '#f1e2c4', .9]); charT._hz = charT._key; }
+  const out = {}; for (const k in out0) if (Array.isArray(out0[k])) out[k] = [out0[k][0], out0[k][1] + dyr];
+  ctx.drawImage(charT, 0, dyr);
+  glowBloom(ctx, out.core[0], out.core[1], 120, .8); glowBloom(ctx, out.eye0[0], out.eye0[1], 50, .6); glowBloom(ctx, out.eye1[0], out.eye1[1], 44, .55);
+  // falling debris from the armour
+  for (const d of S5_DEB) {
+    const u = tq - d.t0; if (u < 0 || u > d.life) continue;
+    const F = robotFrames(riseKeys(onTwos(d.t0))), mp = new Mx().t(960, 1560 - (360 - 240 * sstep(1.6, 6.8, d.t0))).s(.9).mul(F[d.f]).p(d.p[0], d.p[1]);
+    const dy = (360 - 240 * sstep(1.6, 6.8, d.t0)) - camY; // camera moved since spawn
+    const one = [{ ...d, x: mp[0], y: mp[1] + dy, t0: 0, f: d.f2 }];
+    drawDebris(ctx, one, u, { g: 1300, lw: 1.6 });
+  }
+  for (const d of S5_DUST) dustPuff(ctx, d.x, H + 40 + (360 - camY) * 1.0, d.r, (tq - d.t0) / 2.8, d.seed, ['#efdcb6', '#b8a29a'], [.7, -.7], .6);
+  mistLayer(ctx, BG.mistG, H - 260 + (360 - camY) * .6, tau * 16, .8, 1, 1.3);
+  ctx.drawImage(BG.s5fg, -40, H - 330 + (360 - camY) * 1.15);
+  ctx.restore();
+}
+
+/* ---------- S6: he lifts his head toward the gap ---------- */
+function S6(ctx, t) {
+  const tau = t - 33.6, tq = onTwos(tau);
+  const cam = 70 * EZ.inOut(clamp((tau - .5) / 2.5, 0, 1));
+  ctx.drawImage(BG.s5, -40, -60 + cam * .6);
+  godRays(ctx, 1210, 270 + cam * .6, 2.2, 1.4, 14, 1500, .45, 61, '#fff0c0');
+  const hu = kf([[.7, -.45], [.79, -.32, EZ.in2], [.87, .1, t => t], [.96, .62, EZ.out2], [1.04, .86, EZ.out], [1.2, .76, EZ.inOut]], tq);
+  const eyes = kf([[.9, .6], [1.05, 1.15, EZ.out], [1.6, .92]], tq);
+  const P = { pel: 600, hu, aR: .03, aL: .03, hdy: (1 - Math.abs(hu)) * 0, sap: kf([[.9, 0], [1.1, .08], [1.4, -.05], [1.8, 0]], tq) };
+  const m = new Mx().t(960, 2160).s(1.35);
+  const vines = vS2.at(6.6 + tau, () => P);
+  const out0 = robotLayer(charC, `h6|${Math.floor(tau * 12)}`, P, { m, lw: 3, light: LIGHT, warm: 1, sun: 1, seed: poseSeed(P) + 13, eyes: [eyes, eyes * .92], core: .85, vines, look: [0, -.4 * Math.max(0, hu)], brim: Math.max(0, hu) * .8, legs: 'stand' });
+  if (charC._hz !== charC._key) { haze(charC, '#f3ddb4', .08); charC._hz = charC._key; }
+  const out = {}; for (const k in out0) if (Array.isArray(out0[k])) out[k] = [out0[k][0], out0[k][1] + cam];
+  ctx.drawImage(charC, 0, cam);
+  glowBloom(ctx, out.eye0[0], out.eye0[1], 160 * eyes, eyes); glowBloom(ctx, out.eye1[0], out.eye1[1], 140 * eyes, eyes * .92);
+  glowBloom(ctx, out.core[0], out.core[1], 260, .85);
+  if (tau > .8 && tau < 1.2) sparkle(ctx, out.eye0[0], out.eye0[1], 90 * Math.sin((tau - .8) / .4 * Math.PI), .9, '#e6fff8');
+  drawDebris(ctx, DEB_S6, tau - .78, { g: 1600, lw: 1.8 });
+  ctx.save(); ctx.globalCompositeOperation = 'screen'; const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, 'rgba(255,220,150,.25)'); g.addColorStop(1, 'rgba(255,220,150,0)'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+const DEB_S6 = makeDebris(88, 26, (r, i) => ({ kind: ['dirt', 'moss', 'leaf', 'stone'][i % 4], x: 760 + r() * 400, y: 230 + r() * 90, vx: (r() - .5) * 260, vy: -80 - r() * 160, t0: r() * .25, sz: 4 + r() * 8, rot: r() * 3, vr: (r() - .5) * 8, seed: i + 1300, f: 2 + r() * 3, ph: r() * 6, sway: 20, life: 2.5 }));
+
+/* ---------- S6b: POV up through the canopy ---------- */
+const S6B_LEAVES = makeDebris(99, 26, (r, i) => ({ a: r() * TAU, t0: r() * 1.8, sp: .5 + r(), s: 6 + r() * 6, ph: r() * 6, yel: r() < .3 }));
+function S6b(ctx, t) {
+  const tau = t - 36.6, rot = .05 * tau, z = 1 + .03 * tau;
+  ctx.save(); ctx.translate(W * .55, H * .45); ctx.rotate(rot); ctx.scale(z, z); ctx.drawImage(BG.s6b, -BG.s6b.width * .55, -BG.s6b.height * .45); ctx.restore();
+  godRays(ctx, W * .55, H * .42, 0, TAU, 22, 1100, .35, 71, '#fff6d6');
+  glowBloom(ctx, W * .55, H * .42, 380, .7, '#fff3cc');
+  const tq = onTwos(tau);
+  for (const L of S6B_LEAVES) {
+    const u = tq - L.t0; if (u < 0) continue;
+    const d = 40 + u * 260 * L.sp, x = W * .55 + Math.cos(L.a + u * .4) * d, y = H * .42 + Math.sin(L.a + u * .4) * d * .8, s = L.s * (1 + u * 1.6);
+    leafShape(ctx, x, y, s, L.a + u * 2, Math.cos(u * 5 + L.ph), L.yel ? DEB_COL.leafY : ['#c8dc6a', '#7e9a46'], 1.4);
+  }
+}
+
+/* ---------- S7: ignition, the ring of wind ---------- */
+let CROWNS = null;
+function buildCrowns() {
+  CROWNS = []; const r = RNG(1717);
+  for (let row = 3; row < 30; row++) {
+    const y = 300 + row * row * 1.15 + row * 6; if (y > H + 120) break;
+    const R = 10 + row * 3.1, sc = R / 62;
+    for (let x = -R + r() * R; x < W + 140; x += R * (1.25 + r() * .45)) {
+      const yy = y + (r() - .5) * R * .5, dx = (x - 1020) / 270, dy = (yy - 705) / 105;
+      if (dx * dx + dy * dy < 1) continue;
+      CROWNS.push({ x, y: yy, sc, spr: (r() * BG.crowns.length) | 0, ph: r() * 6 });
+    }
+  }
+  CROWNS.sort((a, b) => a.y - b.y);
+}
+const RING_C = [1020, 705];
+const ringR = u => u <= 0 ? 0 : 1900 * EZ.out(clamp(u / 2.0, 0, 1)) + 120 * Math.max(0, u - 2);
+function ringPass(d) { let lo = 0, hi = 4; for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (ringR(mid) < d) lo = mid; else hi = mid; } return lo; }
+const S7_LEAVES = makeDebris(707, 160, (r, i) => ({ a: r() * TAU, d: 260 + r() * 1300, sz: 3 + r() * 6, vz: 160 + r() * 260, ph: r() * 6, f: 3 + r() * 4, yel: r() < .3 }));
+const S7_DUST = makeDebris(708, 18, (r, i) => ({ a: i / 18 * TAU + r() * .3, t0: r() * .3, r: 40 + r() * 40, seed: i + 70 }));
+function S7(ctx, t) {
+  if (!CROWNS) buildCrowns();
+  const tau = t - 38.6, tq = onTwos(tau), IG = .7, LIFT = 3.0;
+  const sk = shake(tau, (tau > IG ? 14 * Math.exp(-(tau - IG) * 2.2) : 0) + (tau > LIFT - .1 ? 10 * Math.exp(-(tau - LIFT) * 2) : 0) + (tau > IG && tau < LIFT ? 1.5 : 0), 24, 30);
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  ctx.drawImage(BG.s7, -60, -40);
+  const ru = tq - IG, R = ringR(ru);
+  // crowns ripple as the ring passes
+  for (const c of CROWNS) {
+    const dx = c.x - RING_C[0], dy = (c.y - RING_C[1]) / .36, d = Math.hypot(dx, dy) || 1;
+    let off = 0;
+    if (ru > 0) { const u = ru - ringPass(d); if (u > 0) off = 16 * c.sc * (1 - Math.exp(-u * 30)) * Math.exp(-u * 2.6) * Math.cos(u * 9); }
+    if (tau > LIFT) { const u2 = tq - LIFT - ringPass(d) * .6; if (u2 > 0 && d < 900) off += 10 * c.sc * Math.exp(-u2 * 3) * Math.cos(u2 * 10) * (1 - d / 900); }
+    const nx = dx / d, ny = dy / d * .36, spr = BG.crowns[c.spr], w = spr.width * c.sc, h = spr.height * c.sc;
+    const lean = off / (16 * c.sc + .001);
+    ctx.drawImage(spr, c.x + nx * off - w / 2, c.y + ny * off - h * .6 - Math.abs(lean) * 2 * c.sc, w * (1 + Math.abs(lean) * .06), h * (1 - Math.abs(lean) * .08));
+  }
+  { const g = ctx.createLinearGradient(0, 250, 0, 760); g.addColorStop(0, 'rgba(232,222,206,.75)'); g.addColorStop(.45, 'rgba(232,222,206,.25)'); g.addColorStop(1, 'rgba(232,222,206,0)'); ctx.fillStyle = g; ctx.fillRect(-80, 250, W + 160, 520); }
+  mistLayer(ctx, BG.mistA, 330, t * 12, .7, 1.2, 1); mistLayer(ctx, BG.mistB, 520, -t * 9, .45, 1.4, 1.4);
+  // robot (standing, small) + flames
+  const pel = kf([[LIFT - .8, 600], [LIFT - .15, 560, EZ.inOut], [LIFT - .05, 572]], tq);
+  const P = { pel, hu: .5, aR: tau > LIFT - .8 ? .25 : .06, aL: tau > LIFT - .8 ? .25 : .06, sq: tau > LIFT - .8 && tau < LIFT ? .03 : 0 };
+  const rootX = RING_C[0], rootY = 712;
+  if (tau < LIFT) {
+    const m = new Mx().t(rootX, rootY).s(.2);
+    if (tau > IG - .15) { const k = tau > IG ? 1 : .4; for (const fx of [-36, 36]) flame(ctx, rootX + fx, rootY - 6, 60 * k + 20 * Math.sin(tq * 30), 16 * k, 0, Math.floor(tq * 12) + fx, .95); }
+    const out = robotLayer(charC, `s7|${Math.floor(tq * 12)}`, P, { m, engine: true, lw: 1.3, light: LIGHT, warm: 1, sun: 1, seed: poseSeed(P), eyes: [1, .95], core: .9, legs: 'stand' });
+    ctx.drawImage(charC, 0, 0);
+    if (tau > IG - .2) { for (const s of [-1, 1]) glowBloom(ctx, out['eng' + s] ? out['eng' + s][0] : rootX, out['eng' + s] ? out['eng' + s][1] : rootY - 220, 40, 1, '#ffe2a0'); }
+    glowBloom(ctx, rootX, rootY - 10, 160 * (tau > IG ? 1 : sstep(IG - .3, IG, tau)), .9, '#ffd890');
+  } else if (tau < LIFT + 2 / 24) {
+    // smear drawing: one stretched frame
+    ctx.save(); ctx.globalAlpha = .9; const m = new Mx().t(rootX, rootY - 140).s(.19, .2 * 2.3);
+    const x = clearC(charC); drawRobot(x, P, { m, lw: 1.3, light: LIGHT, warm: 1, sun: 1, seed: 77, eyes: [1, 1], core: 1, legs: 'fly' }); charC._key = null;
+    ctx.drawImage(charC, 0, 0); ctx.restore();
+    for (let i = 0; i < 9; i++) { const x0 = rootX + (hsh(i, 5) - .5) * 120, y0 = rootY - 200 + hsh(i, 8) * 160; ctx.fillStyle = 'rgba(255,248,225,.7)'; ctx.fillRect(x0, y0 - 500, 1 + hsh(i, 6) * 2.5, 500 + hsh(i, 9) * 200); }
+  }
+  // exhaust column after liftoff
+  if (tau > LIFT) {
+    const u = tau - LIFT;
+    ctx.save(); ctx.globalCompositeOperation = 'screen';
+    const g = ctx.createLinearGradient(rootX - 60, 0, rootX + 60, 0); g.addColorStop(0, 'rgba(255,230,180,0)'); g.addColorStop(.5, `rgba(255,240,200,${.8 * Math.exp(-u * 1.2)})`); g.addColorStop(1, 'rgba(255,230,180,0)');
+    ctx.fillStyle = g; ctx.fillRect(rootX - 60 - u * 20, -50, 120 + u * 40, rootY + 40); ctx.restore();
+    for (const d of S7_DUST) { const x = rootX + Math.cos(d.a) * (30 + u * 300), y = rootY + Math.sin(d.a) * (10 + u * 100); dustPuff(ctx, x, y, d.r * (.5 + u * .5), (tq - LIFT - d.t0) / 2.2, d.seed, ['#f8eacc', '#c2aca4'], [.6, -.8], .5); }
+  }
+  // ring of wind
+  if (ru > 0 && R < 2100) {
+    const a = clamp(1.2 - R / 1900, 0, 1);
+    ctx.save(); ctx.globalCompositeOperation = 'screen';
+    for (const [k, wd, al] of [[1, 5 + R * .004, 1], [.94, 2.5, .55], [.86, 1.6, .35], [.75, 1.2, .2]]) {
+      ctx.beginPath(); ctx.ellipse(RING_C[0], RING_C[1], R * k, R * k * .36, 0, 0, TAU); ctx.lineWidth = wd; ctx.strokeStyle = `rgba(255,246,220,${a * al})`; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.ellipse(RING_C[0], RING_C[1], R, R * .36, 0, 0, TAU); ctx.ellipse(RING_C[0], RING_C[1], R * .8, R * .8 * .36, 0, 0, TAU);
+    ctx.fillStyle = `rgba(255,240,210,${a * .16})`; ctx.fill('evenodd');
+    // mist kicked up along the front
+    for (let i = 0; i < 48; i++) { const th = i / 48 * TAU, x = RING_C[0] + Math.cos(th) * R, y = RING_C[1] + Math.sin(th) * R * .36; softDot(ctx, x, y - 6, 26 + R * .03, '#fff4dc', .3 * a); }
+    // speed strokes
+    const rr = RNG(Math.floor(tq * 12));
+    for (let i = 0; i < 40; i++) { const th = rr() * TAU, r0 = R * (.8 + .18 * rr()), l = 40 + R * .08; const x0 = RING_C[0] + Math.cos(th) * r0, y0 = RING_C[1] + Math.sin(th) * r0 * .36; ctx.strokeStyle = `rgba(255,250,235,${a * .6})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0 + Math.cos(th) * l, y0 + Math.sin(th) * l * .36); ctx.stroke(); }
+    ctx.restore();
+  }
+  // leaves torn up by the wind
+  for (const L of S7_LEAVES) {
+    const tp = IG + ringPass(L.d), u = tq - tp; if (u < 0 || u > 3) continue;
+    const x = RING_C[0] + Math.cos(L.a) * (L.d + u * 220) + Math.sin(u * L.f + L.ph) * 14, y = RING_C[1] + Math.sin(L.a) * (L.d + u * 220) * .36 - L.vz * u + 80 * u * u;
+    leafShape(ctx, x, y, L.sz * (.5 + (y / H)), u * 6 + L.ph, Math.cos(u * L.f + L.ph), L.yel ? DEB_COL.leafY : DEB_COL.leaf, 1);
+  }
+  ctx.restore();
+  if (tau > IG && tau < IG + 3 / 24) { ctx.fillStyle = `rgba(255,244,214,${.5 - (tau - IG) * 4})`; ctx.fillRect(0, 0, W, H); }
+}
+
+/* ---------- S8: into the golden sky ---------- */
+const S8P = [[700, 1110], [650, 520], [930, 215], [1335, 452]], S8_DUR = 3.8;
+function s8u(tau) { const k = clamp(tau / S8_DUR, 0, 1); return 1 - Math.pow(1 - k, 2.1); }
+function s8pos(tau) { const u = s8u(tau), a = 1 - u; const P = S8P; return [a * a * a * P[0][0] + 3 * a * a * u * P[1][0] + 3 * a * u * u * P[2][0] + u * u * u * P[3][0], a * a * a * P[0][1] + 3 * a * a * u * P[1][1] + 3 * a * u * u * P[2][1] + u * u * u * P[3][1]]; }
+const s8scale = tau => lerp(.24, .008, Math.pow(s8u(tau), .7));
+const S8_LEAVES = makeDebris(808, 90, (r, i) => ({ x0: r() * W, t0: .6 + r() * 9, R: 30 + r() * 90, w: (r() < .5 ? -1 : 1) * (1.2 + r() * 1.6), vy: 70 + r() * 70, sz: 5 + Math.pow(r(), 3) * 34, ph: r() * 6, yel: r() < .35 }));
+function S8(ctx, t) {
+  const tau = t - 43.6, tq = onTwos(tau);
+  const sk = shake(tau, tau < .8 ? 8 * (1 - tau / .8) : 0, 24, 40);
+  ctx.save(); ctx.translate(sk[0], sk[1]);
+  ctx.drawImage(BG.s8, -50, -30);
+  godRays(ctx, 1360, 440, 0, TAU, 26, 1600, .3, 81, '#fff2c8');
+  // trail: mist tube (cel two-tone) + light core
+  const now = Math.min(tq, S8_DUR + .2);
+  const pts = [];
+  for (let s = 0; s <= now; s += 1 / 24) pts.push([s, ...s8pos(s), s8scale(s)]);
+  const sun = [1360, 440];
+  const tx = clearC(tmpC);
+  for (const pass of [0, 1, 2]) {
+    const c = pass === 2 ? ctx : tx;
+    if (pass === 2) { ctx.save(); ctx.globalAlpha = .82; ctx.drawImage(tmpC, 0, 0); ctx.restore(); }
+    for (const [s, x, y, sc] of pts) {
+      const age = tau - s; if (age < 0) continue;
+      const lump = .7 + .6 * hsh(Math.round(s * 24), 3), r = (6 + 90 * sc) * lump * (1 + age * .7), dx = age * 16 + n1(s * 6 + age * .3, 4) * age * 10, dy = -age * 6;
+      const a = clamp(1 - (age - 3) / 6, 0, 1); if (a <= 0.02) continue;
+      const lx = (sun[0] - x), ly = (sun[1] - y), ll = Math.hypot(lx, ly) || 1;
+      if (pass === 0) { c.fillStyle = '#d2b0ae'; c.beginPath(); c.arc(x + dx - lx / ll * r * .15, y + dy - ly / ll * r * .15, r * Math.pow(a, .6), 0, TAU); c.fill(); }
+      else if (pass === 1) { c.fillStyle = '#fff0d2'; c.beginPath(); c.arc(x + dx + lx / ll * r * .2, y + dy + ly / ll * r * .2, r * .74 * Math.pow(a, .6), 0, TAU); c.fill(); }
+      else if (age < 2.2) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = `rgba(255,250,225,${.55 * (1 - age / 2.2)})`; ctx.beginPath(); ctx.arc(x + dx * .2, y + dy * .2, Math.max(1.5, r * .22 * (1 - age / 2.5)), 0, TAU); ctx.fill(); ctx.restore(); }
+    }
+  }
+  // the robot itself
+  if (tau < S8_DUR + .1) {
+    const [x, y] = s8pos(tq), sc = s8scale(tq), [x2, y2] = s8pos(tq + .05);
+    const ang = Math.atan2(y2 - y, x2 - x) + Math.PI / 2;
+    const m = new Mx().t(x, y).r(ang).s(sc).t(0, 620);
+    const P = { pel: 600, hu: .6, aR: .32, aL: .32, sq: tq < .3 ? -.05 : 0 };
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    for (const fx of [-95, 95]) flame(ctx, fx * sc, 600 * sc, 900 * sc + 30 * Math.sin(tq * 40) * sc * 5, 60 * sc + 2, 0, Math.floor(tq * 12) + fx, 1);
+    ctx.restore();
+    if (sc > .02) {
+      const x0 = clearC(charC); drawRobot(x0, P, { m, lw: Math.max(.8, sc * 7), light: [-.2, -.98], warm: 1, sun: 1, seed: Math.floor(tq * 12), eyes: [1, 1], core: 1, legs: 'fly', detail: sc > .1 ? 1 : 0 }); charC._key = null;
+      haze(charC, '#f3cf98', .18 * (1 - sc / .24) + .05);
+      ctx.drawImage(charC, 0, 0);
+    }
+    glowBloom(ctx, x, y + 20 * sc * 5, 260 * sc + 30, 1, '#ffe8b0');
+    if (tq < .5) for (let i = 0; i < 18; i++) { const xx = 520 + hsh(i, 9) * 500; ctx.fillStyle = `rgba(255,248,226,${.7 * (1 - tq / .5)})`; ctx.fillRect(xx, 400 + hsh(i, 8) * 300, 2 + hsh(i, 7) * 4, 700); }
+  }
+  // a glint where it vanishes into the sun
+  const gt = tau - (S8_DUR - .05); if (gt > 0 && gt < 1.0) sparkle(ctx, S8P[3][0], S8P[3][1], 130 * Math.sin(gt * Math.PI) * (1 - gt * .3), 1, '#ffffff');
+  // treeline shudder + burst at launch
+  if (tau < 2.2) for (const d of S7_DUST.slice(0, 12)) dustPuff(ctx, 700 + Math.cos(d.a) * (30 + tq * 260), 950 - Math.abs(Math.sin(d.a)) * tq * 60, d.r * .9, (tq - d.t0 * .3) / 2.2, d.seed + 5, ['#fbe7c0', '#c8a898'], [.7, -.7], .5);
+  // leaves spiralling down through the light
+  for (const L of S8_LEAVES) {
+    const u = tq - L.t0; if (u < 0) continue;
+    const y = -60 + L.vy * u * (1 + L.sz / 40), x = L.x0 + Math.cos(u * L.w + L.ph) * L.R + u * 18; if (y > H + 60) continue;
+    const flip = Math.cos(u * 4 + L.ph), backlit = flip < 0;
+    leafShape(ctx, x, y + Math.sin(u * L.w + L.ph) * L.R * .3, L.sz, u * L.w * .7 + L.ph, flip, L.yel ? ['#f3d468', '#c8a040'] : (backlit ? ['#d9e47a', '#b9cc5e'] : ['#8fb04e', '#c4d86a']), Math.max(1, L.sz / 14));
+  }
+  ctx.restore();
+  ctx.save(); ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,200,120,.3)'; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+/* ---------- edit ---------- */
+const SHOTS = [
+  [0, 7.0, S1], [7.0, 13.6, S2], [13.6, 16.8, S3], [16.8, 19.6, S3b], [19.6, 21.0, S4a], [21.0, 24.6, S4],
+  [24.6, 33.6, S5], [33.6, 36.6, S6], [36.6, 38.6, S6b], [38.6, 43.6, S7], [43.6, 55.0, S8]
+];
+const DURATION = 55.0;
+/* ============================================================
+   AUDIO — synthesized score and foley (WebAudio, scheduled)
+   ============================================================ */
+const AU = { C: null, bus: null, rev: null, start: 0, noise: null, ok: false };
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+function audioInit() {
+  const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+  const C = new AC(); AU.C = C;
+  const comp = C.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3; comp.connect(C.destination);
+  AU.master = C.createGain(); AU.master.gain.value = .9; AU.master.connect(comp);
+  // reverb impulse
+  const len = C.sampleRate * 3.6, ib = C.createBuffer(2, len, C.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const d = ib.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2); }
+  AU.rev = C.createConvolver(); AU.rev.buffer = ib; const rg = C.createGain(); rg.gain.value = .55; AU.rev.connect(rg); rg.connect(AU.master);
+  const nb = C.createBuffer(1, C.sampleRate * 4, C.sampleRate), nd = nb.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1; AU.noise = nb;
+  const bb = C.createBuffer(1, C.sampleRate * 4, C.sampleRate), bd = bb.getChannelData(0); let last = 0; for (let i = 0; i < bd.length; i++) { last = (last + .02 * (Math.random() * 2 - 1)) / 1.02; bd[i] = last * 3.5; } AU.brown = bb;
+  AU.ok = true; return true;
+}
+function newBus() { if (AU.bus) { try { AU.bus.disconnect(); AU.busR.disconnect(); } catch (e) { } } AU.bus = AU.C.createGain(); AU.bus.connect(AU.master); AU.busR = AU.C.createGain(); AU.busR.connect(AU.rev); }
+function env(g, t, a, peak, hold, rel, base = .0001) { g.gain.setValueAtTime(base, t); g.gain.linearRampToValueAtTime(peak, t + a); g.gain.setValueAtTime(peak, t + a + hold); g.gain.exponentialRampToValueAtTime(base, t + a + hold + rel); }
+function out(node, dry = 1, wet = .3, pan = 0) {
+  const C = AU.C; let n = node;
+  if (pan && C.createStereoPanner) { const p = C.createStereoPanner(); p.pan.value = pan; n.connect(p); n = p; }
+  if (dry) { const g = C.createGain(); g.gain.value = dry; n.connect(g); g.connect(AU.bus); }
+  if (wet) { const g = C.createGain(); g.gain.value = wet; n.connect(g); g.connect(AU.busR); }
+}
+function osc(type, f, t0, t1) { const o = AU.C.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t0); o.start(t0); o.stop(t1 + .05); return o; }
+function noiseSrc(t0, t1, brown) { const s = AU.C.createBufferSource(); s.buffer = brown ? AU.brown : AU.noise; s.loop = true; s.start(t0, Math.random() * 3); s.stop(t1 + .05); return s; }
+function filt(type, f, q = 1) { const b = AU.C.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; }
+
+/* instruments */
+function piano(t, m, dur = 2.5, v = .12, pan = 0) {
+  const C = AU.C, f = mtof(m), g = C.createGain(), lp = filt('lowpass', 2600 + m * 10, .5);
+  for (const [mul, a, ty] of [[1, 1, 'sine'], [2, .35, 'sine'], [3, .1, 'triangle'], [4.02, .04, 'sine']]) { const o = osc(ty, f * mul, t, t + dur); const og = C.createGain(); og.gain.value = a; o.connect(og); og.connect(g); }
+  g.gain.setValueAtTime(.0001, t); g.gain.linearRampToValueAtTime(v, t + .006); g.gain.exponentialRampToValueAtTime(v * .35, t + .4); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  g.connect(lp); out(lp, .8, .45, pan);
+}
+function pad(t0, t1, notes, v = .05, cut = 900, cutEnd) {
+  const C = AU.C, g = C.createGain(), lp = filt('lowpass', cut, .7);
+  if (cutEnd) lp.frequency.linearRampToValueAtTime(cutEnd, t1);
+  for (const m of notes) for (const d of [-6, 5]) { const o = osc('sawtooth', mtof(m), t0, t1 + 2.5); o.detune.value = d; const og = C.createGain(); og.gain.value = .5; o.connect(og); og.connect(g); }
+  g.gain.setValueAtTime(.0001, t0); g.gain.linearRampToValueAtTime(v, t0 + 1.6); g.gain.setValueAtTime(v, t1); g.gain.linearRampToValueAtTime(.0001, t1 + 2.4);
+  g.connect(lp); out(lp, .7, .5);
+}
+function chirp(t, f0, f1, d, v = .03, pan = 0) {
+  const C = AU.C, o = osc('sine', f0, t, t + d), g = C.createGain();
+  o.frequency.exponentialRampToValueAtTime(f1, t + d * .6); o.frequency.exponentialRampToValueAtTime(f0 * .9, t + d);
+  env(g, t, .005, v, d * .3, d * .6); o.connect(g); out(g, .6, .4, pan);
+}
+function birdSong(t, v = .025, pan = 0) { const r = Math.random; let tt = t; const n = 2 + (r() * 4 | 0), base = 2600 + r() * 1800; for (let i = 0; i < n; i++) { chirp(tt, base * (1 + r() * .2), base * (1.3 + r() * .4), .05 + r() * .07, v, pan); tt += .08 + r() * .07; } }
+function flutter(t, d, v = .05, pan = 0, rate = 15) {
+  const C = AU.C, n = noiseSrc(t, t + d), bp = filt('bandpass', 1300, .8), g = C.createGain();
+  g.gain.setValueAtTime(0, t); for (let k = 0; k < d * rate; k++) { const tk = t + k / rate; g.gain.setValueAtTime(v * (1 - k / (d * rate) * .5), tk); g.gain.setValueAtTime(v * .1, tk + .5 / rate); }
+  g.gain.setValueAtTime(0, t + d); n.connect(bp); bp.connect(g); out(g, .8, .2, pan);
+}
+function rumble(t, d, v = .3, a = 1) {
+  const C = AU.C, n = noiseSrc(t, t + d, true), lp = filt('lowpass', 140, .7), g = C.createGain();
+  env(g, t, a, v, d - a - 1.2, 1.2); n.connect(lp); lp.connect(g); out(g, 1, .15);
+  const s = osc('sine', 34, t, t + d), sg = C.createGain(); env(sg, t, a, v * .5, d - a - 1.2, 1.2); s.connect(sg); out(sg, 1, 0);
+}
+function boom(t, v = .9, f0 = 110, f1 = 26, d = 2.2) {
+  const C = AU.C, s = osc('sine', f0, t, t + d), g = C.createGain(); s.frequency.exponentialRampToValueAtTime(f1, t + d * .8);
+  env(g, t, .01, v, .1, d); s.connect(g); out(g, 1, .25);
+  const n = noiseSrc(t, t + d), lp = filt('lowpass', 900, .5), ng = C.createGain(); lp.frequency.exponentialRampToValueAtTime(120, t + d); env(ng, t, .005, v * .6, .05, d * .8); n.connect(lp); lp.connect(ng); out(ng, 1, .5);
+}
+function whoosh(t, d, v = .25, f0 = 300, f1 = 2400, pan = 0) {
+  const C = AU.C, n = noiseSrc(t, t + d), bp = filt('bandpass', f0, 1.2), g = C.createGain();
+  bp.frequency.exponentialRampToValueAtTime(f1, t + d * .35); bp.frequency.exponentialRampToValueAtTime(f0 * .8, t + d);
+  env(g, t, d * .3, v, 0, d * .7); n.connect(bp); bp.connect(g); out(g, .9, .5, pan);
+}
+function zap(t, d = .07, v = .08) {
+  const C = AU.C, o = osc('square', 98, t, t + d), g = C.createGain(), bp = filt('bandpass', 1800, 2);
+  env(g, t, .002, v, d * .6, d * .4); o.connect(bp); bp.connect(g); out(g, .8, .4);
+  const n = noiseSrc(t, t + d), ng = C.createGain(), hp = filt('highpass', 2500); env(ng, t, .001, v * .8, d * .3, d * .5); n.connect(hp); hp.connect(ng); out(ng, .6, .3);
+}
+function hum(t0, t1, v = .05) {
+  const C = AU.C, g = C.createGain();
+  for (const [f, a] of [[110, 1], [220, .4], [331, .15]]) { const o = osc('sine', f, t0, t1); o.frequency.linearRampToValueAtTime(f * 1.06, t1); const og = C.createGain(); og.gain.value = a; o.connect(og); og.connect(g); }
+  g.gain.setValueAtTime(.0001, t0); g.gain.linearRampToValueAtTime(v, t0 + 1.2); g.gain.setValueAtTime(v, t1 - 1); g.gain.linearRampToValueAtTime(.0001, t1); out(g, .8, .5);
+}
+function tink(t, f = 2400, v = .06, pan = 0) { const C = AU.C; for (const [m, a] of [[1, 1], [2.76, .4], [5.4, .15]]) { const o = osc('sine', f * m, t, t + 2), g = C.createGain(); env(g, t, .002, v * a, 0, 1.8); o.connect(g); out(g, .6, .7, pan); } }
+function creak(t, d, v = .12, f = 900) {
+  // stick-slip friction: irregular impulse train through a resonant filter
+  const C = AU.C, sr = C.sampleRate, len = Math.ceil(d * sr), b = C.createBuffer(1, len, sr), dd = b.getChannelData(0);
+  let pos = 0, rate = 40;
+  while (pos < len) { rate = clamp(rate + (Math.random() - .5) * 18, 18, 120); const amp = .5 + Math.random() * .5; for (let k = 0; k < 40 && pos + k < len; k++) dd[pos + k] += amp * Math.exp(-k / 6) * (k % 2 ? -1 : 1); pos += Math.floor(sr / rate); }
+  const s = C.createBufferSource(); s.buffer = b; s.start(t);
+  const bp = filt('bandpass', f, 9), bp2 = filt('bandpass', f * 2.3, 6), g = C.createGain();
+  bp.frequency.linearRampToValueAtTime(f * .7, t + d);
+  env(g, t, .15, v, d - .4, .25); s.connect(bp); s.connect(bp2); bp.connect(g); bp2.connect(g); out(g, .9, .5, (Math.random() - .5) * .6);
+}
+function groan(t, d, v = .22) {
+  const C = AU.C, g = C.createGain(), lp = filt('lowpass', 520, 2), bp = filt('bandpass', 240, 3);
+  for (const [f, a] of [[44, 1], [66.5, .5], [88.3, .35]]) {
+    const o = osc('sawtooth', f, t, t + d); const steps = 30, cur = new Float32Array(steps); let w = 1;
+    for (let i = 0; i < steps; i++) { w = clamp(w + (Math.random() - .5) * .06, .85, 1.08); cur[i] = f * w * (1 - i / steps * .12); }
+    o.frequency.setValueCurveAtTime(cur, t, d); const og = C.createGain(); og.gain.value = a; o.connect(og); og.connect(g);
+  }
+  env(g, t, .8, v, d - 2, 1.2); g.connect(lp); g.connect(bp); const mg = C.createGain(); mg.gain.value = .8; lp.connect(mg); bp.connect(mg); out(mg, 1, .45);
+}
+function rattle(t, d, v = .05) { for (let i = 0; i < d * 14; i++) { const tt = t + Math.random() * d, C = AU.C, n = noiseSrc(tt, tt + .05), bp = filt('bandpass', 800 + Math.random() * 2500, 3), g = C.createGain(); env(g, tt, .001, v * Math.random(), .005, .04); n.connect(bp); bp.connect(g); out(g, .7, .3, (Math.random() - .5)); } }
+function roar(t, d, v = .4) {
+  const C = AU.C, n = noiseSrc(t, t + d, true), n2 = noiseSrc(t, t + d), lp = filt('lowpass', 1800, .6), lp2 = filt('lowpass', 4000, .5), g = C.createGain(), g2 = C.createGain();
+  lp.frequency.setValueAtTime(1800, t); lp.frequency.exponentialRampToValueAtTime(140, t + d); lp2.frequency.setValueAtTime(5000, t); lp2.frequency.exponentialRampToValueAtTime(300, t + d * .7);
+  env(g, t, .05, v, .4, d - .45); env(g2, t, .02, v * .25, .2, d * .5); n.connect(lp); lp.connect(g); n2.connect(lp2); lp2.connect(g2); out(g, 1, .4); out(g2, .8, .5);
+}
+
+function scheduleAll(T) {
+  newBus();
+  const r = Math.random;
+  // forest bed
+  { const C = AU.C, n = noiseSrc(T, T + 55, true), lp = filt('lowpass', 700, .5), g = C.createGain(); g.gain.setValueAtTime(.0001, T); g.gain.linearRampToValueAtTime(.12, T + 3); g.gain.setValueAtTime(.12, T + 38); g.gain.linearRampToValueAtTime(.05, T + 44); g.gain.linearRampToValueAtTime(.0001, T + 55); n.connect(lp); lp.connect(g); out(g, 1, .2); }
+  for (let i = 0; i < 16; i++) birdSong(T + 1 + r() * 18, .012 + r() * .015, (r() - .5) * 1.4);
+  for (let i = 0; i < 6; i++) birdSong(T + 46 + r() * 7, .012, (r() - .5) * 1.4);
+  // score — gentle, Hisaishi-like piano over strings
+  pad(T + .2, T + 7.2, [47, 54, 61, 62], .03, 700);            // Bm(add9)
+  [[1.2, 78], [2.4, 76], [3.0, 74], [4.3, 69], [5.6, 71], [6.4, 73]].forEach(([d, m]) => piano(T + d, m, 3.2, .09));
+  pad(T + 7.0, T + 13.8, [43, 50, 59, 66], .03, 800);          // Gmaj7
+  [[8.0, 74], [8.9, 76], [9.6, 78], [10.4, 81], [11.5, 86], [11.7, 90], [12.6, 83]].forEach(([d, m]) => piano(T + d, m, 3, d > 11 ? .05 : .09, d > 11 ? .4 : 0));
+  pad(T + 13.6, T + 19.5, [40, 47, 55, 62], .025, 600);        // Em
+  [[14.2, 71], [16.4, 74], [17.4, 79]].forEach(([d, m]) => piano(T + d, m, 3.5, .06));
+  // awakening foley
+  flutter(T + 10.6, .9, .05, .5); tink(T + 11.52, 3800, .015, .4); birdSong(T + 12.4, .03, .4);
+  for (const d of [14.6, 14.81, 15.06, 15.18]) zap(T + d);
+  hum(T + 15.18, T + 21, .045);
+  tink(T + 17.35, 1800, .05, -.2); tink(T + 17.85, 2150, .045, .2);
+  for (let i = 0; i < 4; i++) tink(T + 18.1 + i * .08, 3800, .012);
+  // tremor
+  rumble(T + 19.1, 6.2, .32, .6); rattle(T + 19.3, 2, .05); flutter(T + 19.86, .7, .07, .6);
+  for (let i = 0; i < 14; i++) flutter(T + 21.3 + r() * 1.1, .5 + r() * .5, .03 + r() * .03, (r() - .5) * 1.6, 13 + r() * 6);
+  for (let i = 0; i < 8; i++) birdSong(T + 21.3 + r() * 1.4, .03, (r() - .5) * 1.6);
+  { const C = AU.C, o = osc('sine', 36.7, T + 19.6, T + 33), g = C.createGain(); g.gain.setValueAtTime(.0001, T + 19.6); g.gain.linearRampToValueAtTime(.12, T + 22); g.gain.linearRampToValueAtTime(.16, T + 30); g.gain.linearRampToValueAtTime(.0001, T + 33); o.connect(g); out(g, 1, .1); }
+  for (const d of [21.0, 22.4, 23.6]) boom(T + d, .35, 70, 40, 1.4);
+  // the rise
+  pad(T + 24.8, T + 28.2, [35, 47, 54, 59], .04, 500, 1400);
+  pad(T + 28.0, T + 31.0, [31, 43, 50, 59], .05, 700, 1900);
+  pad(T + 30.8, T + 34.0, [33, 45, 52, 61], .055, 900, 2400);
+  groan(T + 25.3, 6.2, .26); creak(T + 26.0, 2.0, .12, 950); creak(T + 27.6, 1.4, .1, 1300); creak(T + 28.5, 1.8, .13, 760); creak(T + 29.6, 1.0, .1, 1100);
+  rattle(T + 26, 5, .06); boom(T + 25.4, .35, 80, 40, 1.2); boom(T + 30.2, .7, 90, 30, 1.8); rumble(T + 25.4, 6, .22, .4);
+  zap(T + 28.7, .03, .03); whoosh(T + 28.7, .6, .05, 1500, 3000);
+  creak(T + 34.3, .7, .11, 1200);
+  // look up — eyes flare
+  pad(T + 34.0, T + 38.6, [38, 50, 57, 62, 66], .06, 1200, 2600);   // D major
+  tink(T + 34.65, 1568, .07); tink(T + 34.7, 2349, .05); whoosh(T + 34.5, 1.2, .08, 800, 3000);
+  [[36.6, 86], [36.9, 85], [37.2, 81], [37.6, 78]].forEach(([d, m]) => piano(T + d, m, 3, .06, .3));
+  // ignition
+  { const C = AU.C, o = osc('sawtooth', 120, T + 38.6, T + 39.4), g = C.createGain(), lp = filt('lowpass', 900); o.frequency.exponentialRampToValueAtTime(900, T + 39.3); env(g, T + 38.6, .6, .05, .05, .15); o.connect(lp); lp.connect(g); out(g, .9, .4); }
+  boom(T + 39.3, 1.0, 120, 24, 2.6); whoosh(T + 39.3, 2.4, .32, 200, 1800); roar(T + 39.3, 2.4, .2);
+  roar(T + 41.4, 6.4, .42); boom(T + 41.6, .9, 140, 26, 2.2); whoosh(T + 41.5, 1.4, .3, 400, 4000);
+  // flight — full theme
+  const th = [[43.8, [38, 50, 57, 62, 66]], [46.0, [37, 49, 57, 64, 69]], [48.2, [35, 47, 54, 62, 66]], [50.4, [31, 43, 50, 59, 62]]];
+  th.forEach(([d, notes], i) => pad(T + d, T + d + 2.3 + (i === 3 ? 2.2 : 0), notes, .065, 1400, 2800));
+  [[43.9, 74], [44.3, 78], [44.7, 81], [45.1, 86], [46.0, 85], [46.5, 81], [47.0, 76], [47.35, 93], [48.2, 83], [48.7, 78], [49.2, 74], [50.4, 79], [50.9, 83], [51.4, 86], [52.4, 90]].forEach(([d, m]) => piano(T + d, m, 3.4, d === 47.35 ? .05 : .085, (m - 80) / 20));
+  tink(T + 47.35, 3136, .06, .3);
+  for (let i = 0; i < 10; i++) { const tt = T + 45 + r() * 9; flutter(tt, .4, .012, (r() - .5), 6); }
+}
+/* ============================================================
+   MAIN — film surface, playback, UI
+   ============================================================ */
+const cv = document.getElementById('film'), ctx = cv.getContext('2d');
+cv.width = W; cv.height = H;
+let GRAIN = [], VIG = null;
+function buildPost() {
+  for (let k = 0; k < 4; k++) { const g = mk(256, 256), x = g.getContext('2d'), id = x.createImageData(256, 256); for (let i = 0; i < id.data.length; i += 4) { const v = 128 + (Math.random() - .5) * 120; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; } x.putImageData(id, 0, 0); GRAIN.push(ctx.createPattern(g, 'repeat')); }
+  VIG = mk(W, H); const v = VIG.getContext('2d'), g = v.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * 1.05);
+  g.addColorStop(0, 'rgba(30,20,40,0)'); g.addColorStop(1, 'rgba(30,20,40,.42)'); v.fillStyle = g; v.fillRect(0, 0, W, H);
+}
+function renderFrame(t) {
+  const f = Math.floor(t * FPS);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  // gate weave (sub-pixel, per frame)
+  const wx = (hsh(f, 91) - .5) * .7, wy = (hsh(f, 92) - .5) * .7;
+  ctx.setTransform(1.004, 0, 0, 1.004, -W * .002 + wx, -H * .002 + wy);
+  let shot = SHOTS[SHOTS.length - 1];
+  for (const s of SHOTS) if (t >= s[0] && t < s[1]) { shot = s; break; }
+  shot[2](ctx, Math.min(t, DURATION - .001));
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  // film surface
+  ctx.drawImage(VIG, 0, 0);
+  ctx.save(); ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = .1; ctx.fillStyle = GRAIN[f % 4];
+  ctx.translate((hsh(f, 3) * 256) | 0, (hsh(f, 4) * 256) | 0); ctx.fillRect(-256, -256, W + 256, H + 256); ctx.restore();
+  // fades
+  const fin = 1 - sstep(0, 1.8, t), fout = sstep(DURATION - 2.2, DURATION, t);
+  const a = Math.max(fin, fout); if (a > 0) { ctx.fillStyle = `rgba(0,0,0,${a})`; ctx.fillRect(0, 0, W, H); }
+}
+
+/* ---------- playback ---------- */
+const ui = document.getElementById('ui'), btn = document.getElementById('play'), msg = document.getElementById('msg'), bar = document.getElementById('bar');
+let playing = false, paused = false, lastF = -1, t0perf = 0, pauseAt = 0, muted = false;
+function now() { if (AU.ok) return AU.C.currentTime - AU.start; return (performance.now() - t0perf) / 1000; }
+function loop() {
+  if (!playing) return;
+  const t = now();
+  if (t >= DURATION) { renderFrame(DURATION - .001); playing = false; showEnd(); return; }
+  const f = Math.floor(t * FPS);
+  if (f !== lastF) { renderFrame(t); lastF = f; }
+  requestAnimationFrame(loop);
+}
+function play() {
+  ui.classList.add('hide');
+  if (!AU.C) audioInit();
+  if (AU.ok) { AU.C.resume(); AU.start = AU.C.currentTime + .15; scheduleAll(AU.start); AU.master.gain.value = muted ? 0 : .9; }
+  t0perf = performance.now() + 150;
+  playing = true; paused = false; lastF = -1; requestAnimationFrame(loop);
+}
+function showEnd() { msg.textContent = ''; btn.textContent = '↻  다시 보기'; ui.classList.remove('hide'); ui.classList.add('end'); }
+btn.addEventListener('click', play);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && playing) { e.preventDefault(); if (AU.ok) { paused ? AU.C.resume() : AU.C.suspend(); } paused = !paused; if (!paused && !AU.ok) t0perf = performance.now() - pauseAt * 1000; else pauseAt = now(); }
+  if (e.key === 'r' || e.key === 'R') { play(); }
+  if (e.key === 'm' || e.key === 'M') { muted = !muted; if (AU.ok) AU.master.gain.value = muted ? 0 : .9; }
+  if (e.key === 'f' || e.key === 'F') { const el = document.documentElement; document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen && el.requestFullscreen(); }
+});
+
+/* ---------- boot: paint the backgrounds ---------- */
+(async () => {
+  const steps = 20; let done = 0;
+  const tick = () => new Promise(r => { done++; bar.style.width = Math.min(100, done / steps * 100) + '%'; setTimeout(r, 0); });
+  buildPost();
+  await buildS1(tick); await buildS2(tick); await buildS5(tick); await buildS6b(tick); await buildS7(tick); await buildS8(tick);
+  buildCrowns();
+  bar.style.width = '100%'; setTimeout(() => bar.parentNode.style.opacity = 0, 300);
+  const m = location.hash.match(/t=([\d.]+)/);
+  if (m) { ui.classList.add('hide'); renderFrame(parseFloat(m[1])); window.__still = true; window.__render = t => renderFrame(t); return; }
+  renderFrame(4.0); ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H);
+  msg.textContent = ''; btn.disabled = false; btn.textContent = '▶  재생  (소리 켜짐)';
+})();
+</script>
+</body>
+</html>
